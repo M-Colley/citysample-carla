@@ -1,0 +1,1306 @@
+diff --git a/Unreal/CarlaUnreal/Plugins/Carla/Source/Carla/Actor/ActorRegistry.cpp b/Unreal/CarlaUnreal/Plugins/Carla/Source/Carla/Actor/ActorRegistry.cpp
+index a74575f03..d11cea93c 100644
+--- a/Unreal/CarlaUnreal/Plugins/Carla/Source/Carla/Actor/ActorRegistry.cpp
++++ b/Unreal/CarlaUnreal/Plugins/Carla/Source/Carla/Actor/ActorRegistry.cpp
+@@ -21,6 +21,8 @@
+ namespace crp = carla::rpc;
+ 
+ FActorRegistry::IdType FActorRegistry::ID_COUNTER = 0u;
++FActorRegistry::IdType FActorRegistry::DORMANT_ID_COUNTER =
++    FActorRegistry::DORMANT_ID_BASE;
+ 
+ static FCarlaActor::ActorType FActorRegistry_GetActorType(const AActor *Actor)
+ {
+@@ -139,6 +141,49 @@ FCarlaActor* FActorRegistry::Register(AActor &Actor, FActorDescription Descripti
+   return Result.Get();
+ }
+ 
++FCarlaActor* FActorRegistry::RegisterDormant(
++    FActorDescription Description,
++    FCarlaActor::ActorType Type,
++    const TSet<crp::CityObjectLabel> &SemanticTags,
++    const FBoundingBox &BoundingBox,
++    UWorld *InWorld)
++{
++  // Separate counter: a dormant proxy must never consume an id that a real
++  // spawn would otherwise have used, or enabling the bridge would renumber
++  // every subsequently spawned actor.
++  const IdType Id = ++FActorRegistry::DORMANT_ID_COUNTER;
++
++  auto Info = MakeShared<FActorInfo>();
++  Info->Description = std::move(Description);
++  Info->SemanticTags = SemanticTags;
++  Info->BoundingBox = BoundingBox;
++
++  Info->SerializedData.id = Id;
++  Info->SerializedData.description = Info->Description;
++  Info->SerializedData.bounding_box = Info->BoundingBox;
++  Info->SerializedData.semantic_tags.reserve(Info->SemanticTags.Num());
++  for (auto &&Tag : Info->SemanticTags)
++  {
++    using tag_t = decltype(Info->SerializedData.semantic_tags)::value_type;
++    Info->SerializedData.semantic_tags.emplace_back(static_cast<tag_t>(Tag));
++  }
++
++  TSharedPtr<FCarlaActor> View =
++      FCarlaActor::ConstructCarlaActor(
++          Id, nullptr, std::move(Info), Type,
++          crp::ActorState::Dormant, InWorld);
++
++  // A null entry here is exactly what PutActorToSleep stores for a normally
++  // streamed-out actor, and it preserves the Actors/ActorDatabase size
++  // invariant that Register() checks - so Deregister(IdType) works unmodified.
++  Actors.Emplace(Id, nullptr);
++
++  TSharedPtr<FCarlaActor> &Result = ActorDatabase.Emplace(Id, MoveTemp(View));
++
++  check(static_cast<size_t>(Actors.Num()) == ActorDatabase.Num());
++  return Result.Get();
++}
++
+ void FActorRegistry::Deregister(IdType Id)
+ {
+   FCarlaActor* CarlaActor = FindCarlaActor(Id);
+diff --git a/Unreal/CarlaUnreal/Plugins/Carla/Source/Carla/Actor/ActorRegistry.h b/Unreal/CarlaUnreal/Plugins/Carla/Source/Carla/Actor/ActorRegistry.h
+index ae7a1c532..ddc237670 100644
+--- a/Unreal/CarlaUnreal/Plugins/Carla/Source/Carla/Actor/ActorRegistry.h
++++ b/Unreal/CarlaUnreal/Plugins/Carla/Source/Carla/Actor/ActorRegistry.h
+@@ -15,7 +15,12 @@
+ #include <unordered_map>
+ 
+ /// A registry of all the Carla actors.
+-class FActorRegistry
++///
++/// CARLA_API: the Mass bridge lives in its own module and calls the
++/// out-of-line RegisterDormant/Deregister. Without the export those are
++/// LNK2019 from any other module - nothing outside the Carla module had
++/// ever called them, so the omission went unnoticed.
++class CARLA_API FActorRegistry
+ {
+ public:
+ 
+@@ -39,6 +44,35 @@ public:
+   /// @warning Undefined if an actor is registered more than once.
+   FCarlaActor* Register(AActor &Actor, FActorDescription Description, IdType DesiredId = 0);
+ 
++  /// Register a CARLA actor that has NO backing UE AActor.
++  ///
++  /// The entry is created directly in ActorState::Dormant, which every read
++  /// path already handles by falling back to FActorData - see
++  /// FCarlaActor::GetActorLocalTransform, FCarlaActor::GetActorVelocity and
++  /// FWorldObserver_GetDormantActorState. Nothing downstream of creation needs
++  /// an AActor; only this door was missing.
++  ///
++  /// Used by the Mass bridge to mirror MassTraffic / MassCrowd ECS entities,
++  /// of which at most ~50 are ever backed by a real AActor (and which 50
++  /// churns every few frames as the LOD viewer moves).
++  ///
++  /// Ids come from a SEPARATE counter based at DORMANT_ID_BASE so they can
++  /// never collide with, or renumber, ordinary spawned actors - turning the
++  /// bridge off leaves the normal id sequence exactly as it would have been.
++  ///
++  /// @warning The caller owns the returned actor's FActorData, must refresh it
++  /// every frame, and must call Deregister(Id) when the entity dies.
++  FCarlaActor* RegisterDormant(
++      FActorDescription Description,
++      FCarlaActor::ActorType Type,
++      const TSet<carla::rpc::CityObjectLabel> &SemanticTags,
++      const FBoundingBox &BoundingBox,
++      UWorld *World);
++
++  /// First id handed out by RegisterDormant. Chosen high so a dormant proxy is
++  /// obvious in a log and can never be confused with a spawned actor.
++  static constexpr IdType DORMANT_ID_BASE = 0x80000000u;
++
+   void Deregister(IdType Id);
+ 
+   void Deregister(AActor *Actor);
+@@ -130,4 +164,6 @@ private:
+   DatabaseType ActorDatabase;
+ 
+   static IdType ID_COUNTER;
++
++  static IdType DORMANT_ID_COUNTER;
+ };
+diff --git a/Unreal/CarlaUnreal/Plugins/Carla/Source/Carla/BlueprintLibary/MeshToLandscape.cpp b/Unreal/CarlaUnreal/Plugins/Carla/Source/Carla/BlueprintLibary/MeshToLandscape.cpp
+index 082aef43d..7024653bb 100644
+--- a/Unreal/CarlaUnreal/Plugins/Carla/Source/Carla/BlueprintLibary/MeshToLandscape.cpp
++++ b/Unreal/CarlaUnreal/Plugins/Carla/Source/Carla/BlueprintLibary/MeshToLandscape.cpp
+@@ -1,6 +1,7 @@
+ // Copyright (c) 2026 Computer Vision Center (CVC) at the Universitat Autonoma de Barcelona (UAB). This work is licensed under the terms of the MIT license. For a copy, see <https://opensource.org/licenses/MIT>.
+ 
+ #include "MeshToLandscape.h"
++#include "Carla/Util/CarlaTraceChannels.h"
+ 
+ #include <util/ue-header-guard-begin.h>
+ #include "Landscape.h"
+@@ -387,7 +388,7 @@ ALandscape* UMeshToLandscapeUtil::ConvertMeshesToLandscape(
+ 				if (World->ParallelLineTraceSingleByChannel(
+ 					Hit,
+ 					Begin, End,
+-					ECollisionChannel::ECC_GameTraceChannel2,
++					CarlaTraceChannels::SensorTrace(),
+ 					CQParams))
+ 				{
+ 					if (ComponentMap.Contains(Hit.GetComponent())) // Done
+diff --git a/Unreal/CarlaUnreal/Plugins/Carla/Source/Carla/Commandlet/LoadAssetMaterialsCommandlet.cpp b/Unreal/CarlaUnreal/Plugins/Carla/Source/Carla/Commandlet/LoadAssetMaterialsCommandlet.cpp
+index 4be8a89ca..82af8b8e6 100644
+--- a/Unreal/CarlaUnreal/Plugins/Carla/Source/Carla/Commandlet/LoadAssetMaterialsCommandlet.cpp
++++ b/Unreal/CarlaUnreal/Plugins/Carla/Source/Carla/Commandlet/LoadAssetMaterialsCommandlet.cpp
+@@ -35,10 +35,17 @@ ULoadAssetMaterialsCommandlet::ULoadAssetMaterialsCommandlet()
+ 
+ #if WITH_EDITORONLY_DATA
+ 
+-  static ConstructorHelpers::FObjectFinder<UBlueprint> RoadPainterBlueprint(TEXT(
+-    "Blueprint'/Game/Carla/Blueprints/LevelDesign/RoadPainterPreset.RoadPainterPreset'"));
+-
+-  RoadPainterSubclass = (UClass*)RoadPainterBlueprint.Object->GeneratedClass;
++  // Deliberately NOT a ConstructorHelpers::FObjectFinder.
++  //
++  // The Carla module has LoadingPhase "PostConfigInit", so this CDO is
++  // constructed during FEngineLoop::PreInitPostStartupScreen, well before the
++  // project's /Game/ content is mounted. An FObjectFinder there reaches
++  // FlushAsyncLoading() inside the package loader and dies with
++  // EXCEPTION_ACCESS_VIOLATION, taking the whole process down at startup -
++  // even though this commandlet is not the thing being run.
++  //
++  // Resolve it on first use instead. A commandlet only needs the asset once it
++  // actually runs, by which point loading is safe.
+ 
+   // Dirt
+   DecalNamesMap.Add("dirt1", "MaterialInstanceConstant'/Game/Carla/Static/Decals/Road/RoadDirt/DI_RoadDirt_01.DI_RoadDirt_01'");
+@@ -123,6 +130,28 @@ ULoadAssetMaterialsCommandlet::ULoadAssetMaterialsCommandlet()
+ #endif
+ }
+ 
++TSubclassOf<ARoadPainterWrapper> ULoadAssetMaterialsCommandlet::GetRoadPainterSubclass()
++{
++#if WITH_EDITORONLY_DATA
++  if (RoadPainterSubclass == nullptr)
++  {
++    UBlueprint *Blueprint = LoadObject<UBlueprint>(
++        nullptr,
++        TEXT("/Game/Carla/Blueprints/LevelDesign/RoadPainterPreset.RoadPainterPreset"));
++    if (Blueprint != nullptr)
++    {
++      RoadPainterSubclass = Blueprint->GeneratedClass;
++    }
++    else
++    {
++      UE_LOG(LogCarla, Warning,
++             TEXT("RoadPainterPreset could not be loaded; road decals will be skipped."));
++    }
++  }
++#endif
++  return RoadPainterSubclass;
++}
++
+ #if WITH_EDITORONLY_DATA
+ 
+ void ULoadAssetMaterialsCommandlet::ApplyRoadPainterMaterials(const FString &LoadedMapName, const FString &PackageName, bool IsInTiles)
+diff --git a/Unreal/CarlaUnreal/Plugins/Carla/Source/Carla/Commandlet/LoadAssetMaterialsCommandlet.h b/Unreal/CarlaUnreal/Plugins/Carla/Source/Carla/Commandlet/LoadAssetMaterialsCommandlet.h
+index a9d39fdfc..ea3f4a91a 100644
+--- a/Unreal/CarlaUnreal/Plugins/Carla/Source/Carla/Commandlet/LoadAssetMaterialsCommandlet.h
++++ b/Unreal/CarlaUnreal/Plugins/Carla/Source/Carla/Commandlet/LoadAssetMaterialsCommandlet.h
+@@ -92,6 +92,11 @@ private:
+   UPROPERTY()
+   TSubclassOf<ARoadPainterWrapper> RoadPainterSubclass;
+ 
++  /// Resolves RoadPainterSubclass on first call and caches it.
++  /// Loading it in the constructor is not safe: see the comment in
++  /// ULoadAssetMaterialsCommandlet::ULoadAssetMaterialsCommandlet.
++  TSubclassOf<ARoadPainterWrapper> GetRoadPainterSubclass();
++
+   /// Dictionary for translating the JSON file "decal_names" array
+   /// to already loaded Material Instances, which are used to apply on the roads
+   UPROPERTY()
+diff --git a/Unreal/CarlaUnreal/Plugins/Carla/Source/Carla/Game/CarlaGameModeBase.cpp b/Unreal/CarlaUnreal/Plugins/Carla/Source/Carla/Game/CarlaGameModeBase.cpp
+index 830004cd6..8ec5785c7 100644
+--- a/Unreal/CarlaUnreal/Plugins/Carla/Source/Carla/Game/CarlaGameModeBase.cpp
++++ b/Unreal/CarlaUnreal/Plugins/Carla/Source/Carla/Game/CarlaGameModeBase.cpp
+@@ -36,6 +36,7 @@
+ #include "DrawDebugHelpers.h"
+ #include "Kismet/KismetSystemLibrary.h"
+ #include "Misc/PackageName.h"
++#include "WorldPartition/WorldPartitionSubsystem.h"
+ #include <util/ue-header-guard-end.h>
+ 
+ namespace cr = carla::road;
+@@ -292,6 +293,14 @@ void ACarlaGameModeBase::BeginPlay()
+         this, &ACarlaGameModeBase::OnLevelAddedToWorld);
+   }
+ 
++  // World Partition runtime cells do NOT broadcast LevelAddedToWorld, so the
++  // hook above never sees them. Subscribe to the streaming subsystem as well.
++  if (UWorldPartitionSubsystem *WPSubsystem = World->GetSubsystem<UWorldPartitionSubsystem>())
++  {
++    StreamingStateUpdatedHandle = WPSubsystem->OnStreamingStateUpdated().AddUObject(
++        this, &ACarlaGameModeBase::OnWorldPartitionStreamingUpdated);
++  }
++
+   // HACK: fix transparency see-through issues
+   // The problem: transparent objects are visible through walls.
+   // This is due to a weird interaction between the SkyAtmosphere component,
+@@ -514,9 +523,41 @@ void ACarlaGameModeBase::OnLevelAddedToWorld(ULevel* InLevel, UWorld* InWorld)
+   }
+ }
+ 
++void ACarlaGameModeBase::OnWorldPartitionStreamingUpdated()
++{
++  UWorld *World = GetWorld();
++  if (World == nullptr)
++  {
++    return;
++  }
++
++  // Streaming state updates fire every time a source moves, far more often
++  // than cells actually appear. Tagging is idempotent but walks every actor,
++  // so rate-limit it.
++  const double Now = World->GetTimeSeconds();
++  if (Now - LastStreamingRetagTime < 1.0)
++  {
++    return;
++  }
++  LastStreamingRetagTime = Now;
++
++  ATagger::TagActorsInLevel(*World, true);
++}
++
+ void ACarlaGameModeBase::EndPlay(const EEndPlayReason::Type EndPlayReason)
+ {
+   FWorldDelegates::LevelAddedToWorld.RemoveAll(this);
++  if (StreamingStateUpdatedHandle.IsValid())
++  {
++    if (UWorld *World = GetWorld())
++    {
++      if (UWorldPartitionSubsystem *WPSubsystem = World->GetSubsystem<UWorldPartitionSubsystem>())
++      {
++        WPSubsystem->OnStreamingStateUpdated().Remove(StreamingStateUpdatedHandle);
++      }
++    }
++    StreamingStateUpdatedHandle.Reset();
++  }
+   FCarlaStaticDelegates::OnEpisodeSettingsChange.Remove(OnEpisodeSettingsChangeHandle);
+ 
+   Episode->EndPlay();
+diff --git a/Unreal/CarlaUnreal/Plugins/Carla/Source/Carla/Game/CarlaGameModeBase.h b/Unreal/CarlaUnreal/Plugins/Carla/Source/Carla/Game/CarlaGameModeBase.h
+index 8a67ccd1a..aa8b14517 100644
+--- a/Unreal/CarlaUnreal/Plugins/Carla/Source/Carla/Game/CarlaGameModeBase.h
++++ b/Unreal/CarlaUnreal/Plugins/Carla/Source/Carla/Game/CarlaGameModeBase.h
+@@ -155,6 +155,14 @@ private:
+   /// untagged (semantic segmentation rendered them unlabeled).
+   void OnLevelAddedToWorld(ULevel* InLevel, UWorld* InWorld);
+ 
++  /// Re-tag actors after World Partition brings new cells in.
++  ///
++  /// FWorldDelegates::LevelAddedToWorld does not fire for World Partition
++  /// runtime cells, so streamed-in geometry never reached ATagger: semantic
++  /// cameras and semantic lidar both reported it as Unlabeled even though the
++  /// meshes were loaded and blocking traces.
++  void OnWorldPartitionStreamingUpdated();
++
+   void SpawnActorFactories();
+ 
+   void GenerateSpawnPoints();
+@@ -204,6 +212,12 @@ private:
+ 
+   FDelegateHandle OnEpisodeSettingsChangeHandle;
+ 
++  FDelegateHandle StreamingStateUpdatedHandle;
++
++  /// Debounce for the retag above: streaming state updates fire far more
++  /// often than cells actually appear.
++  double LastStreamingRetagTime = 0.0;
++
+   std::optional<carla::road::Map> Map;
+ 
+   int PendingLevelsToLoad = 0;
+diff --git a/Unreal/CarlaUnreal/Plugins/Carla/Source/Carla/Game/Tagger.cpp b/Unreal/CarlaUnreal/Plugins/Carla/Source/Carla/Game/Tagger.cpp
+index ddfcdd80e..4e05c8f97 100644
+--- a/Unreal/CarlaUnreal/Plugins/Carla/Source/Carla/Game/Tagger.cpp
++++ b/Unreal/CarlaUnreal/Plugins/Carla/Source/Carla/Game/Tagger.cpp
+@@ -15,6 +15,10 @@
+ #include "Engine/StaticMesh.h"
+ #include "EngineUtils.h"
+ #include "PhysicsEngine/PhysicsAsset.h"
++#include "HAL/IConsoleManager.h"
++#include "Misc/ConfigCacheIni.h"
++#include "Misc/Parse.h"
++#include "WorldPartition/HLOD/HLODActor.h"
+ #include <util/ue-header-guard-end.h>
+ 
+ namespace crp = carla::rpc;
+@@ -60,6 +64,219 @@ crp::CityObjectLabel ATagger::GetLabelByFolderName(const FString &String) {
+   else                               return crp::CityObjectLabel::None;
+ }
+ 
++
++// ===========================================================================
++//  Asset-path label rules
++// ===========================================================================
++//
++// CARLA's original GetLabelByPath reads the folder immediately after a "Static"
++// folder in the asset path. That only classifies content laid out the way
++// CARLA's own is. Epic's City Sample stores meshes under /Game/Building,
++// /Game/Road/Kit_*, /Game/Prop/Kit_*, /Game/Vehicle/veh*, /Game/Crowd, ... so
++// every one of its meshes resolved to None and semantic segmentation came back
++// blank.
++//
++// The table below is seeded from the actual City Sample content taxonomy.
++// Longest prefix wins, so a specific kit beats its parent folder.
++
++namespace
++{
++  struct FCarlaPathLabelRule
++  {
++    FString Prefix;
++    crp::CityObjectLabel Label;
++  };
++
++  // Seeded from the real folder listing of Content/. Order here is irrelevant -
++  // the array is sorted longest-prefix-first at load.
++  const TPair<const TCHAR *, crp::CityObjectLabel> GCitySampleDefaultRules[] =
++  {
++    // --- roads and their markings -----------------------------------------
++    { TEXT("/Game/Road/Kit_MeshDecals_"),     crp::CityObjectLabel::RoadLines    },
++    { TEXT("/Game/Road/Kit_Sidewalk_"),       crp::CityObjectLabel::Sidewalks    },
++    { TEXT("/Game/Road/Kit_Small_Curb_"),     crp::CityObjectLabel::Sidewalks    },
++    { TEXT("/Game/Road/Kit_City_Road"),       crp::CityObjectLabel::Roads        },
++    { TEXT("/Game/Road/Kit_Freeway_"),        crp::CityObjectLabel::Roads        },
++    { TEXT("/Game/Road"),                     crp::CityObjectLabel::Roads        },
++
++    // --- signage, signals, poles ------------------------------------------
++    { TEXT("/Game/AI/Traffic/TrafficLights"), crp::CityObjectLabel::TrafficLight },
++    { TEXT("/Game/Prop/Kit_BusStopSign_"),    crp::CityObjectLabel::TrafficSigns },
++    { TEXT("/Game/Prop/Kit_StopSign_"),       crp::CityObjectLabel::TrafficSigns },
++    { TEXT("/Game/Prop/Kit_StreetSign_"),     crp::CityObjectLabel::TrafficSigns },
++    { TEXT("/Game/Prop/Kit_Street_Sign_"),    crp::CityObjectLabel::TrafficSigns },
++    { TEXT("/Game/Prop/Kit_PoleSign_"),       crp::CityObjectLabel::TrafficSigns },
++    { TEXT("/Game/Prop/Kit_Sign_"),           crp::CityObjectLabel::TrafficSigns },
++    { TEXT("/Game/Prop/Kit_StreetLamp_"),     crp::CityObjectLabel::Poles        },
++
++    // --- vegetation --------------------------------------------------------
++    { TEXT("/Game/Prop/Kit_TreeBase_"),       crp::CityObjectLabel::Vegetation   },
++    { TEXT("/Game/Prop/Kit_Tree_"),           crp::CityObjectLabel::Vegetation   },
++
++    // --- barriers ----------------------------------------------------------
++    { TEXT("/Game/Prop/Kit_Barricade_"),      crp::CityObjectLabel::Fences       },
++    { TEXT("/Game/Prop/Kit_Railing_"),        crp::CityObjectLabel::Fences       },
++    { TEXT("/Game/Prop/Kit_Border_"),         crp::CityObjectLabel::Fences       },
++
++    // --- misc street furniture --------------------------------------------
++    { TEXT("/Game/Prop/Kit_Bicycle_"),        crp::CityObjectLabel::Bicycle      },
++    { TEXT("/Game/Prop/Kit_ManholeCover_"),   crp::CityObjectLabel::Ground       },
++    { TEXT("/Game/Prop/Kit_Dirt_"),           crp::CityObjectLabel::Ground       },
++    { TEXT("/Game/Prop/kit_ocean"),           crp::CityObjectLabel::Water        },
++    { TEXT("/Game/Prop/Kit_fog"),             crp::CityObjectLabel::Other        },
++    // Rooftop mechanical kit reads as part of the building silhouette.
++    { TEXT("/Game/Prop/Kit_roof_"),           crp::CityObjectLabel::Buildings    },
++    { TEXT("/Game/Prop"),                     crp::CityObjectLabel::Static       },
++
++    // --- buildings ---------------------------------------------------------
++    { TEXT("/Game/Building"),                 crp::CityObjectLabel::Buildings    },
++    // Wave Function Collapse building assembly.
++    { TEXT("/Game/WFC"),                      crp::CityObjectLabel::Buildings    },
++
++    // --- vehicles ----------------------------------------------------------
++    // Usually dead: skeletal vehicles resolve through the PHYSICS ASSET path,
++    // and Content/Vehicle/Physics is a sibling of vehTruck_*, so they land on
++    // the /Game/Vehicle catch-all. Kept because static vehicle meshes do exist.
++    { TEXT("/Game/Vehicle/vehBus_"),          crp::CityObjectLabel::Bus          },
++    { TEXT("/Game/Vehicle/vehTruck_"),        crp::CityObjectLabel::Truck        },
++    { TEXT("/Game/Vehicle"),                  crp::CityObjectLabel::Car          },
++
++    // --- people ------------------------------------------------------------
++    { TEXT("/Game/Crowd"),                    crp::CityObjectLabel::Pedestrians  },
++    { TEXT("/Game/Character"),                crp::CityObjectLabel::Pedestrians  },
++
++    // --- terrain and background -------------------------------------------
++    { TEXT("/Game/Environment/Freeway"),      crp::CityObjectLabel::Roads        },
++    { TEXT("/Game/Environment"),              crp::CityObjectLabel::Terrain      },
++    { TEXT("/Game/Megascans/3D_Assets"),      crp::CityObjectLabel::Static       },
++    { TEXT("/Game/Megascans"),                crp::CityObjectLabel::Terrain      },
++    { TEXT("/Game/City"),                     crp::CityObjectLabel::Static       },
++    { TEXT("/Game/Effect"),                   crp::CityObjectLabel::Other        },
++
++    // World Partition HLOD proxy meshes live in the HLOD actor's own hashed
++    // external package, NOT in /Game/Map/HLOD (which holds only the five
++    // UHLODLayer settings assets). One merged proxy spans many semantic
++    // classes, so any single label is wrong at the silhouette; Static is
++    // least-wrong, and this only fires for standalone HLOD because TagActor
++    // skips AWorldPartitionHLOD outright.
++    { TEXT("/Game/__ExternalActors__"),       crp::CityObjectLabel::Static       },
++  };
++
++  TArray<FCarlaPathLabelRule> GPathLabelRules;
++  bool bPathLabelRulesLoaded = false;
++
++  void LoadPathLabelRules()
++  {
++    GPathLabelRules.Reset();
++
++    // Projects that are not City Sample can switch the built-ins off wholesale
++    // rather than overriding rules one at a time.
++    bool bUseBuiltins = true;
++    GConfig->GetBool(TEXT("CarlaTagger"), TEXT("bUseBuiltinCitySampleRules"),
++                     bUseBuiltins, GGameIni);
++    if (bUseBuiltins)
++    {
++      for (const auto &Rule : GCitySampleDefaultRules)
++      {
++        GPathLabelRules.Add({FString(Rule.Key), Rule.Value});
++      }
++    }
++
++    // [CarlaTagger] +PathLabel=(Prefix="/Game/Foo", Label="Buildings")
++    TArray<FString> Configured;
++    GConfig->GetArray(TEXT("CarlaTagger"), TEXT("PathLabel"), Configured, GGameIni);
++    for (const FString &Entry : Configured)
++    {
++      FString Prefix, LabelName;
++      if (!FParse::Value(*Entry, TEXT("Prefix="), Prefix) ||
++          !FParse::Value(*Entry, TEXT("Label="), LabelName))
++      {
++        UE_LOG(LogCarla, Warning, TEXT("CarlaTagger: cannot parse PathLabel entry \"%s\""), *Entry);
++        continue;
++      }
++      const crp::CityObjectLabel Label = ATagger::GetTagFromString(LabelName);
++      // An ini rule with an existing prefix replaces the built-in.
++      const int32 Existing = GPathLabelRules.IndexOfByPredicate(
++          [&Prefix](const FCarlaPathLabelRule &R)
++          { return R.Prefix.Equals(Prefix, ESearchCase::IgnoreCase); });
++      if (Existing != INDEX_NONE)
++      {
++        GPathLabelRules[Existing].Label = Label;
++      }
++      else
++      {
++        GPathLabelRules.Add({Prefix, Label});
++      }
++    }
++
++    // Longest prefix first, ties broken alphabetically: TArray::Sort is an
++    // unstable introsort, so the comparator must be total or rule resolution
++    // varies between builds.
++    GPathLabelRules.Sort([](const FCarlaPathLabelRule &A, const FCarlaPathLabelRule &B)
++    {
++      return A.Prefix.Len() != B.Prefix.Len() ? A.Prefix.Len() > B.Prefix.Len()
++                                              : A.Prefix < B.Prefix;
++    });
++
++    bPathLabelRulesLoaded = true;
++    UE_LOG(LogCarla, Log, TEXT("CarlaTagger: %d asset-path label rules loaded (builtins %s)"),
++           GPathLabelRules.Num(), bUseBuiltins ? TEXT("on") : TEXT("off"));
++  }
++}
++
++namespace
++{
++  /// Whether World Partition HLOD proxy meshes get a label.
++  ///
++  /// Off by default: one merged proxy spans many semantic classes, so any
++  /// single label is wrong at every silhouette boundary, and leaving it
++  /// untagged lets the camera fall through to the real streamed meshes.
++  /// Turn it on ([CarlaTagger] bTagHLODProxies=True) when the view is
++  /// dominated by proxies and a coarse label beats none at all.
++  bool ShouldTagHLODProxies()
++  {
++    static bool bCached = false;
++    static bool bValue = false;
++    if (!bCached)
++    {
++      GConfig->GetBool(TEXT("CarlaTagger"), TEXT("bTagHLODProxies"), bValue, GGameIni);
++      bCached = true;
++      UE_LOG(LogCarla, Log, TEXT("CarlaTagger: HLOD proxies are %s"),
++             bValue ? TEXT("TAGGED") : TEXT("skipped"));
++    }
++    return bValue;
++  }
++}
++
++crp::CityObjectLabel ATagger::GetLabelByAssetPath(const FString &Path)
++{
++  if (!bPathLabelRulesLoaded)
++  {
++    LoadPathLabelRules();
++  }
++  for (const FCarlaPathLabelRule &Rule : GPathLabelRules)
++  {
++    // Anchor at a folder or kit boundary so "/Game/Prop" does not also swallow
++    // a future "/Game/Props". The bare-prefix branch is deliberate: several
++    // rules end in '_' and are meant to match mid-name.
++    if (Path.Equals(Rule.Prefix, ESearchCase::IgnoreCase) ||
++        Path.StartsWith(Rule.Prefix + TEXT("/"), ESearchCase::IgnoreCase) ||
++        (Rule.Prefix.EndsWith(TEXT("_")) &&
++         Path.StartsWith(Rule.Prefix, ESearchCase::IgnoreCase)))
++    {
++      return Rule.Label;
++    }
++  }
++  return crp::CityObjectLabel::None;
++}
++
++void ATagger::ReloadPathLabelRules()
++{
++  GConfig->Flush(true, GGameIni);
++  LoadPathLabelRules();
++}
++
++
+ void ATagger::SetStencilValue( UPrimitiveComponent &Component, const uint32 ActorID, const crp::CityObjectLabel &Label, const bool bSetRenderCustomDepth) 
+ {
+ 
+@@ -127,8 +344,65 @@ static void ATagger_SetLabelTag(UPrimitiveComponent &Component, crp::CityObjectL
+   Component.ComponentTags.Insert(FName(*ATagger::GetTagAsString(Label)), 0);
+ }
+ 
++
++// ---------------------------------------------------------------------------
++//  Tagging census
++// ---------------------------------------------------------------------------
++// Semantic segmentation came back ~98% Unlabeled even after the rule table
++// landed, and the lidar object_tag path agreed with the render path - which
++// means the components were never tagged at all, rather than tagged and lost.
++// The only way to tell "TagActor is not reaching them" from "TagActor reaches
++// them and the label does not survive" is to count what it actually visits.
++namespace
++{
++  struct FTaggerStats
++  {
++    int32 Actors = 0;
++    int32 Skipped = 0;          // HLOD proxies
++    int32 StaticComponents = 0;
++    int32 SkeletalComponents = 0;
++    int32 Labelled = 0;         // got something other than None
++    int32 Unlabelled = 0;
++  };
++  FTaggerStats GTaggerStats;
++
++  void LogTaggerCensus(const TCHAR *Where)
++  {
++    UE_LOG(LogCarla, Log,
++           TEXT("CarlaTagger census [%s]: actors=%d (hlod-skipped=%d) "
++                "staticComps=%d skelComps=%d labelled=%d unlabelled=%d"),
++           Where, GTaggerStats.Actors, GTaggerStats.Skipped,
++           GTaggerStats.StaticComponents, GTaggerStats.SkeletalComponents,
++           GTaggerStats.Labelled, GTaggerStats.Unlabelled);
++  }
++}
++
+ void ATagger::TagActor(const AActor &Actor, bool bTagForSemanticSegmentation)
+ {
++  ++GTaggerStats.Actors;
++  // World Partition HLOD proxies merge many semantic classes into a single
++  // mesh, so any one label is wrong at every silhouette boundary. Leaving
++  // them untagged lets the semantic camera fall through to the real streamed
++  // meshes behind them.
++  if (!ShouldTagHLODProxies() && Actor.IsA(AWorldPartitionHLOD::StaticClass()))
++  {
++    ++GTaggerStats.Skipped;
++    return;
++  }
++
++
++  // One line per DISTINCT unmatched asset path. This is the worklist for
++  // extending the rule table: anything printed here renders as Unlabeled.
++  auto ReportUnmatched = [](const FString &AssetPath)
++  {
++    static TSet<FString> Reported;
++    bool bAlready = false;
++    Reported.Add(AssetPath, &bAlready);
++    if (!bAlready)
++    {
++      UE_LOG(LogCarla, Log, TEXT("CarlaTagger: UNMATCHED \"%s\""), *AssetPath);
++    }
++  };
+ #ifdef CARLA_TAGGER_EXTRA_LOG
+   UE_LOG(LogCarla, Log, TEXT("Actor: %s"), *Actor.GetName());
+ #endif // CARLA_TAGGER_EXTRA_LOG
+@@ -140,6 +414,14 @@ void ATagger::TagActor(const AActor &Actor, bool bTagForSemanticSegmentation)
+   for (UStaticMeshComponent *Component : StaticMeshComponents) 
+   {
+     auto Label = GetLabelByPath(Component->GetStaticMesh());
++    ++GTaggerStats.StaticComponents;
++    if (Label == crp::CityObjectLabel::None) { ++GTaggerStats.Unlabelled; }
++    else { ++GTaggerStats.Labelled; }
++    if (Label == crp::CityObjectLabel::None)
++    {
++      ReportUnmatched(Component->GetStaticMesh()
++          ? Component->GetStaticMesh()->GetPathName() : TEXT("<null static mesh>"));
++    }
+     if (Label == crp::CityObjectLabel::Pedestrians && Cast<ACarlaWheeledVehicle>(&Actor))
+     {
+       Label = crp::CityObjectLabel::Rider;
+@@ -159,6 +441,14 @@ void ATagger::TagActor(const AActor &Actor, bool bTagForSemanticSegmentation)
+ 
+   for (USkeletalMeshComponent *Component : SkeletalMeshComponents) {
+     auto Label = GetLabelByPath(Component->GetPhysicsAsset());
++    ++GTaggerStats.SkeletalComponents;
++    if (Label == crp::CityObjectLabel::None) { ++GTaggerStats.Unlabelled; }
++    else { ++GTaggerStats.Labelled; }
++    if (Label == crp::CityObjectLabel::None)
++    {
++      ReportUnmatched(Component->GetPhysicsAsset()
++          ? Component->GetPhysicsAsset()->GetPathName() : TEXT("<null physics asset>"));
++    }
+     if (Label == crp::CityObjectLabel::Pedestrians && Cast<ACarlaWheeledVehicle>(&Actor))
+     {
+       Label = crp::CityObjectLabel::Rider;
+@@ -176,17 +466,25 @@ void ATagger::TagActor(const AActor &Actor, bool bTagForSemanticSegmentation)
+ 
+ void ATagger::TagActorsInLevel(UWorld &World, bool bTagForSemanticSegmentation)
+ {
++  // Reset first. World Partition re-tags on every streaming update, and without
++  // this the counters accumulate for the life of the process - the log reported
++  // "actors=3235048 staticComps=32919350" for a world holding a few thousand of
++  // each, which is worse than no census at all.
++  GTaggerStats = FTaggerStats{};
+   for (TActorIterator<AActor> it(&World); it; ++it) {
+     TagActor(**it, bTagForSemanticSegmentation);
+   }
++  LogTaggerCensus(TEXT("world"));
+ }
+ 
+ 
+ void ATagger::TagActorsInLevel(ULevel &Level, bool bTagForSemanticSegmentation)
+ {
++  GTaggerStats = FTaggerStats{};
+   for (AActor * Actor : Level.Actors) {
+     TagActor(*Actor, bTagForSemanticSegmentation);
+   }
++  LogTaggerCensus(TEXT("level"));
+ }
+ 
+ crp::CityObjectLabel ATagger::GetTagOfTaggedComponent(const UPrimitiveComponent &Component)
+diff --git a/Unreal/CarlaUnreal/Plugins/Carla/Source/Carla/Game/Tagger.h b/Unreal/CarlaUnreal/Plugins/Carla/Source/Carla/Game/Tagger.h
+index 051f325b3..08ddc4d78 100644
+--- a/Unreal/CarlaUnreal/Plugins/Carla/Source/Carla/Game/Tagger.h
++++ b/Unreal/CarlaUnreal/Plugins/Carla/Source/Carla/Game/Tagger.h
+@@ -72,6 +72,27 @@ public:
+   /// Method that computes the label corresponding to a folder path
+   static crp::CityObjectLabel GetLabelByFolderName(const FString &String);
+ 
++  /// Label for an asset path, from a data-driven prefix table.
++  ///
++  /// CARLA's original rule reads the folder immediately after "Static" in the
++  /// asset path, which only works for content laid out as CARLA's own is. City
++  /// Sample uses /Game/Building, /Game/Road, /Game/Prop/Kit_* and so on, so
++  /// every one of its meshes fell through to None. The table is seeded with
++  /// City Sample's real folder taxonomy and can be extended per project from
++  /// [CarlaTagger] in DefaultGame.ini - no recompile.
++  ///
++  /// Returns None when no rule matches, so the caller falls back to the
++  /// original folder heuristic.
++  static crp::CityObjectLabel GetLabelByAssetPath(const FString &Path);
++
++  /// Re-read the [CarlaTagger] rules from Config/DefaultGame.ini.
++  ///
++  /// Nothing in the plugin calls this: the rules are loaded lazily on
++  /// first use and the ini is only read at startup. It exists so a
++  /// project can re-read them after editing the ini at runtime - wire it
++  /// to a console command if you want that; there is no built-in one.
++  static void ReloadPathLabelRules();
++
+   /// Method that computes the label corresponding to an specific object
+   /// using the folder path in which it is stored
+   template <typename T>
+@@ -84,6 +105,15 @@ public:
+       return crp::CityObjectLabel::None;
+     }
+     const FString Path = Object->GetPathName();
++    // Project-specific prefix rules take priority: they are explicit, whereas
++    // the folder heuristic below is a guess that silently yields None.
++    {
++      const crp::CityObjectLabel FromRules = GetLabelByAssetPath(Path);
++      if (FromRules != crp::CityObjectLabel::None)
++      {
++        return FromRules;
++      }
++    }
+     TArray<FString> StringArray;
+     Path.ParseIntoArray(StringArray, TEXT("/"), false);
+     if (!Path.StartsWith(TEXT("/Game/")))
+diff --git a/Unreal/CarlaUnreal/Plugins/Carla/Source/Carla/Navigation/CarlaNavigationSubsystem.cpp b/Unreal/CarlaUnreal/Plugins/Carla/Source/Carla/Navigation/CarlaNavigationSubsystem.cpp
+index 6f67bacbd..669b7e9b5 100644
+--- a/Unreal/CarlaUnreal/Plugins/Carla/Source/Carla/Navigation/CarlaNavigationSubsystem.cpp
++++ b/Unreal/CarlaUnreal/Plugins/Carla/Source/Carla/Navigation/CarlaNavigationSubsystem.cpp
+@@ -15,15 +15,46 @@
+ 
+ bool UCarlaNavigationSubsystem::HasServerSideNavigation() const
+ {
+-  const UNavigationSystemV1 *NavSys =
++  UNavigationSystemV1 *NavSys =
+       FNavigationSystem::GetCurrent<UNavigationSystemV1>(GetWorld());
+   if (NavSys == nullptr)
+   {
++    UE_LOG(LogCarla, Log,
++           TEXT("Navigation: no navigation system; using the client-side navmesh"));
+     return false;
+   }
+   const ARecastNavMesh *NavMesh =
+       Cast<ARecastNavMesh>(NavSys->GetDefaultNavDataInstance());
+-  return (NavMesh != nullptr) && NavMesh->HasValidNavmesh();
++  if ((NavMesh == nullptr) || !NavMesh->HasValidNavmesh())
++  {
++    UE_LOG(LogCarla, Log,
++           TEXT("Navigation: no valid RecastNavMesh; using the client-side navmesh"));
++    return false;
++  }
++
++  // HasValidNavmesh() only says a dtNavMesh object exists and is sized - it is
++  // true for a navmesh with zero tiles in it. A level that ships a
++  // RecastNavMesh actor whose data was never built (or whose tiles have not
++  // streamed in) therefore claims server-side navigation and then fails every
++  // query, and the client does NOT fall back: Simulator::
++  // GetRandomLocationFromNavigation returns an empty optional once
++  // IsServerSide() is true. The whole client-side path, including any
++  // Saved/Nav/<Map>.bin, becomes unreachable and every walker API silently
++  // does nothing.
++  //
++  // Sampling one point is the direct test of the thing that actually matters -
++  // are there polygons to navigate on - and this runs once per client, from
++  // the is_navigation_server_side RPC.
++  FNavLocation Probe;
++  if (!NavSys->GetRandomPoint(Probe, NavSys->GetDefaultNavDataInstance()))
++  {
++    UE_LOG(LogCarla, Warning,
++           TEXT("Navigation: '%s' has a valid navmesh object but no reachable "
++                "polygons - falling back to the client-side navmesh"),
++           *NavMesh->GetName());
++    return false;
++  }
++  return true;
+ }
+ 
+ bool UCarlaNavigationSubsystem::GetRandomNavLocation(FVector &OutLocation) const
+@@ -41,8 +72,14 @@ bool UCarlaNavigationSubsystem::GetRandomNavLocation(FVector &OutLocation) const
+   FSharedConstNavQueryFilter QueryFilter;
+   if (ANavigationData *NavData = NavSys->GetDefaultNavDataInstance())
+   {
++    // Use the three-argument overload explicitly. With two arguments the
++    // UClass* returned by StaticClass() converts to `const UObject*` by a
++    // standard pointer conversion, which beats the user-defined conversion to
++    // TSubclassOf, so overload resolution picks the non-static
++    // GetQueryFilter(const ANavigationData&, const UObject*) const and the
++    // call fails with C2352. Passing an explicit Querier disambiguates.
+     QueryFilter = UNavigationQueryFilter::GetQueryFilter(
+-        *NavData, UCarlaWalkerNavFilter::StaticClass());
++        *NavData, nullptr, UCarlaWalkerNavFilter::StaticClass());
+   }
+   FNavLocation Result;
+   if (!NavSys->GetRandomPoint(Result, nullptr, QueryFilter))
+diff --git a/Unreal/CarlaUnreal/Plugins/Carla/Source/Carla/Sensor/CustomV2XSensor.cpp b/Unreal/CarlaUnreal/Plugins/Carla/Source/Carla/Sensor/CustomV2XSensor.cpp
+index 898264f95..06ecd63fc 100644
+--- a/Unreal/CarlaUnreal/Plugins/Carla/Source/Carla/Sensor/CustomV2XSensor.cpp
++++ b/Unreal/CarlaUnreal/Plugins/Carla/Source/Carla/Sensor/CustomV2XSensor.cpp
+@@ -9,6 +9,10 @@
+ #include "Carla.h"
+ #include "Carla/Actor/ActorBlueprintFunctionLibrary.h"
+ #include "Carla/Game/CarlaEpisode.h"
++// UCarlaStatics::GetCurrentEpisode is used below. Without this include the file
++// only compiles when a unity blob happens to pull CarlaStatics.h in ahead of
++// it, which is why it builds in some configurations and not others.
++#include "Carla/Game/CarlaStatics.h"
+ #include "Carla/Vehicle/CarlaWheeledVehicle.h"
+ #include "V2X/PathLossModel.h"
+ 
+diff --git a/Unreal/CarlaUnreal/Plugins/Carla/Source/Carla/Sensor/Radar.cpp b/Unreal/CarlaUnreal/Plugins/Carla/Source/Carla/Sensor/Radar.cpp
+index 295c8c92e..3816157e3 100644
+--- a/Unreal/CarlaUnreal/Plugins/Carla/Source/Carla/Sensor/Radar.cpp
++++ b/Unreal/CarlaUnreal/Plugins/Carla/Source/Carla/Sensor/Radar.cpp
+@@ -7,6 +7,7 @@
+ #include "Carla/Sensor/Radar.h"
+ #include "Carla.h"
+ #include "Carla/Actor/ActorBlueprintFunctionLibrary.h"
++#include "Carla/Util/CarlaTraceChannels.h"
+ 
+ #include <util/disable-ue4-macros.h>
+ #include <carla/geom/Math.h>
+@@ -41,6 +42,11 @@ void ARadar::Set(const FActorDescription &ActorDescription)
+ {
+   Super::Set(ActorDescription);
+   UActorBlueprintFunctionLibrary::SetRadar(ActorDescription, this);
++
++  // Resolve the trace channel here, on the game thread. UCollisionProfile::Get()
++  // guards LoadProfileConfig() with a plain non-atomic `static bool`, and the
++  // magic static below would otherwise first initialise inside a ParallelFor.
++  (void)CarlaTraceChannels::SensorTrace();
+ }
+ 
+ void ARadar::SetHorizontalFOV(float NewHorizontalFOV)
+@@ -121,6 +127,17 @@ void ARadar::CalculateCurrentVelocity(const float DeltaTime)
+ void ARadar::SendLineTraces(float DeltaTime)
+ {
+   TRACE_CPUPROFILER_EVENT_SCOPE(ARadar::SendLineTraces);
++
++  // The sensor's own ignore-list is built in the constructor, where GetOwner()
++  // is still null. Refresh it here: with SensorTrace defaulting to ECR_Block
++  // the ego's body and wheels would otherwise block every ray and the radar
++  // would report its own bodywork.
++  TraceParams.ClearIgnoredActors();
++  TraceParams.AddIgnoredActor(this);
++  if (const AActor *Parent = GetOwner())
++  {
++    TraceParams.AddIgnoredActor(Parent);
++  }
+   constexpr float TO_METERS = 1e-2;
+   const FTransform& ActorTransform = GetActorTransform();
+   const FRotator& TransformRotator = ActorTransform.Rotator();
+@@ -166,7 +183,7 @@ void ARadar::SendLineTraces(float DeltaTime)
+         OutHit,
+         RadarLocation,
+         EndLocation,
+-        ECC_GameTraceChannel2,
++        CarlaTraceChannels::SensorTrace(),
+         TraceParams,
+         FCollisionResponseParams::DefaultResponseParam
+       );
+diff --git a/Unreal/CarlaUnreal/Plugins/Carla/Source/Carla/Sensor/RayCastSemanticLidar.cpp b/Unreal/CarlaUnreal/Plugins/Carla/Source/Carla/Sensor/RayCastSemanticLidar.cpp
+index a3a832a56..dbebbaf75 100644
+--- a/Unreal/CarlaUnreal/Plugins/Carla/Source/Carla/Sensor/RayCastSemanticLidar.cpp
++++ b/Unreal/CarlaUnreal/Plugins/Carla/Source/Carla/Sensor/RayCastSemanticLidar.cpp
+@@ -8,6 +8,7 @@
+ #include "Carla.h"
+ #include "Carla/Actor/ActorBlueprintFunctionLibrary.h"
+ #include "Carla/Game/Tagger.h"
++#include "Carla/Util/CarlaTraceChannels.h"
+ 
+ #include <util/disable-ue4-macros.h>
+ #include "carla/geom/Math.h"
+@@ -52,6 +53,11 @@ void ARayCastSemanticLidar::Set(const FLidarDescription &LidarDescription)
+   SemanticLidarData = FSemanticLidarData(Description.Channels);
+   CreateLasers();
+   PointsPerChannel.resize(Description.Channels);
++
++  // Resolve the trace channel here, on the game thread. UCollisionProfile::Get()
++  // guards LoadProfileConfig() with a plain non-atomic `static bool`, and the
++  // magic static below would otherwise first initialise inside a ParallelFor.
++  (void)CarlaTraceChannels::SensorTrace();
+ }
+ 
+ void ARayCastSemanticLidar::CreateLasers()
+@@ -138,6 +144,13 @@ void ARayCastSemanticLidar::SimulateLidar(const float DeltaTime)
+       TRACE_CPUPROFILER_EVENT_SCOPE(ParallelForTask);
+ 
+       FCollisionQueryParams TraceParams = FCollisionQueryParams(FName(TEXT("Laser_Trace")), true, this);
++      // The ignored actor is the SENSOR, not the vehicle it is bolted to. With
++      // SensorTrace defaulting to ECR_Block the ego's own body and wheels block
++      // the channel, and a roof-mounted lidar returns a shell of its own trunk.
++      if (AActor *Parent = GetOwner())
++      {
++        TraceParams.AddIgnoredActor(Parent);
++      }
+       TraceParams.bTraceComplex = true;
+       TraceParams.bReturnPhysicalMaterial = false;
+ 
+@@ -269,7 +282,7 @@ bool ARayCastSemanticLidar::ShootLaser(const float VerticalAngle, const float Ho
+     HitInfo,
+     LidarBodyLoc,
+     EndTrace,
+-    ECC_GameTraceChannel2,
++    CarlaTraceChannels::SensorTrace(),
+     TraceParams,
+     FCollisionResponseParams::DefaultResponseParam
+   );
+diff --git a/Unreal/CarlaUnreal/Plugins/Carla/Source/Carla/Sensor/V2X/CaService.cpp b/Unreal/CarlaUnreal/Plugins/Carla/Source/Carla/Sensor/V2X/CaService.cpp
+index 29b0a0133..361129dbe 100644
+--- a/Unreal/CarlaUnreal/Plugins/Carla/Source/Carla/Sensor/V2X/CaService.cpp
++++ b/Unreal/CarlaUnreal/Plugins/Carla/Source/Carla/Sensor/V2X/CaService.cpp
+@@ -593,10 +593,13 @@ const carla::geom::Vector3D CaService::ComputeAccelerometerNoise(
+     // A mean of 0.0 is used as a first parameter, the standard deviation is
+     // determined by the client
+     constexpr float Mean = 0.0f;
++    // FVector components are double in UE5, so each sum is a double and the
++    // braced initialiser of a float-based Vector3D is a narrowing conversion
++    // (C2398). Cast explicitly rather than widening Vector3D.
+     return carla::geom::Vector3D{
+-        Accelerometer.X + mRandomEngine->GetNormalDistribution(Mean, StdDevAccel.X),
+-        Accelerometer.Y + mRandomEngine->GetNormalDistribution(Mean, StdDevAccel.Y),
+-        Accelerometer.Z + mRandomEngine->GetNormalDistribution(Mean, StdDevAccel.Z)};
++        static_cast<float>(Accelerometer.X + mRandomEngine->GetNormalDistribution(Mean, StdDevAccel.X)),
++        static_cast<float>(Accelerometer.Y + mRandomEngine->GetNormalDistribution(Mean, StdDevAccel.Y)),
++        static_cast<float>(Accelerometer.Z + mRandomEngine->GetNormalDistribution(Mean, StdDevAccel.Z))};
+ }
+ 
+ carla::geom::Vector3D CaService::ComputeAccelerometer(
+diff --git a/Unreal/CarlaUnreal/Plugins/Carla/Source/Carla/Traffic/TrafficLightManager.cpp b/Unreal/CarlaUnreal/Plugins/Carla/Source/Carla/Traffic/TrafficLightManager.cpp
+index 535446e4a..282ed3015 100644
+--- a/Unreal/CarlaUnreal/Plugins/Carla/Source/Carla/Traffic/TrafficLightManager.cpp
++++ b/Unreal/CarlaUnreal/Plugins/Carla/Source/Carla/Traffic/TrafficLightManager.cpp
+@@ -32,113 +32,150 @@ ATrafficLightManager::ATrafficLightManager()
+   SceneComponent = CreateDefaultSubobject<USceneComponent>(TEXT("RootComponent"));
+   RootComponent = SceneComponent;
+ 
+-  // Hard coded default traffic light blueprint
+-  static ConstructorHelpers::FClassFinder<AActor> TrafficLightRHTFinder(
+-      TEXT( "/Game/Carla/Blueprints/TrafficLight/BP_TLOpenDrive_RHT" ) );
+-  if (TrafficLightRHTFinder.Succeeded())
++  // The traffic light and traffic sign blueprints are NOT loaded here.
++  //
++  // The Carla module has LoadingPhase "PostConfigInit" - it has to, because it
++  // registers global shaders (see IMPLEMENT_SHADER_TYPE in CameraModelUtil.cpp)
++  // and those must be registered before the engine initialises shader types.
++  // That means this CDO is constructed inside
++  // FEngineLoop::PreInitPostStartupScreen, long before /Game/ content exists.
++  // A ConstructorHelpers::FClassFinder there pulls in a Blueprint, which drags
++  // the Kismet compilation manager into PreInit, which loads the LiveCoding
++  // module, whose StartupModule then dies in CastChecked<UPackage> - killing
++  // the process before any map is opened.
++  //
++  // LoadDefaultModels() does the same work on first use instead.
++
++  TrafficLightGroupMissingId = -2;
++}
++
++namespace
++{
++  // ConstructorHelpers::FClassFinder takes a package path and appends the
++  // object name and the "_C" suffix itself. LoadClass does not, so rebuild the
++  // full object path here to keep the call sites identical to the originals.
++  TSubclassOf<AActor> LoadBlueprintActorClass(const TCHAR *PackagePath)
++  {
++    const FString Path(PackagePath);
++    FString Name;
++    if (!Path.Split(TEXT("/"), nullptr, &Name, ESearchCase::CaseSensitive, ESearchDir::FromEnd))
++    {
++      return nullptr;
++    }
++    return LoadClass<AActor>(nullptr, *FString::Printf(TEXT("%s.%s_C"), *Path, *Name));
++  }
++}
++
++void ATrafficLightManager::LoadDefaultModels()
++{
++  if (bDefaultModelsLoaded)
++  {
++    return;
++  }
++  bDefaultModelsLoaded = true;
++
++  if (TSubclassOf<AActor> Loaded = LoadBlueprintActorClass(
++          TEXT("/Game/Carla/Blueprints/TrafficLight/BP_TLOpenDrive_RHT")))
+   {
+-    TSubclassOf<AActor> Model = TrafficLightRHTFinder.Class;
++    TSubclassOf<AActor> Model = Loaded;
+     TrafficLightModel_RHT = Model;
+   }
+ 
+-  // Hard coded default traffic light blueprint
+-  static ConstructorHelpers::FClassFinder<AActor> TrafficLightLHTFinder(
+-    TEXT( "/Game/Carla/Blueprints/TrafficLight/BP_TLOpenDrive_LHT" ) );
+-  if (TrafficLightLHTFinder.Succeeded())
++  if (TSubclassOf<AActor> Loaded = LoadBlueprintActorClass(
++          TEXT("/Game/Carla/Blueprints/TrafficLight/BP_TLOpenDrive_LHT")))
+   {
+-    TSubclassOf<AActor> Model = TrafficLightLHTFinder.Class;
++    TSubclassOf<AActor> Model = Loaded;
+     TrafficLightModel_LHT = Model;
+   }
+-  // Default traffic signs models
+-  static ConstructorHelpers::FClassFinder<AActor> StopFinder(
+-      TEXT( "/Game/Carla/Static/TrafficSign/BP_Stop01" ) );
+-  if (StopFinder.Succeeded())
++
++  if (TSubclassOf<AActor> Loaded = LoadBlueprintActorClass(
++          TEXT("/Game/Carla/Static/TrafficSign/BP_Stop01")))
+   {
+-    TSubclassOf<AActor> StopSignModel = StopFinder.Class;
++    TSubclassOf<AActor> StopSignModel = Loaded;
+     TrafficSignsModels.Add(carla::road::SignalType::StopSign().c_str(), StopSignModel);
+     SignComponentModels.Add(carla::road::SignalType::StopSign().c_str(), UStopSignComponent::StaticClass());
+   }
+-  static ConstructorHelpers::FClassFinder<AActor> YieldFinder(
+-      TEXT( "/Game/Carla/Static/TrafficSign/BP_Yield01" ) );
+-  if (YieldFinder.Succeeded())
++
++  if (TSubclassOf<AActor> Loaded = LoadBlueprintActorClass(
++          TEXT("/Game/Carla/Static/TrafficSign/BP_Yield01")))
+   {
+-    TSubclassOf<AActor> YieldSignModel = YieldFinder.Class;
++    TSubclassOf<AActor> YieldSignModel = Loaded;
+     TrafficSignsModels.Add(carla::road::SignalType::YieldSign().c_str(), YieldSignModel);
+     SignComponentModels.Add(carla::road::SignalType::YieldSign().c_str(), UYieldSignComponent::StaticClass());
+   }
+-  static ConstructorHelpers::FClassFinder<AActor> SpeedLimit30Finder(
+-      TEXT( "/Game/Carla/Static/TrafficSign/BP_SpeedLimit30" ) );
+-  if (SpeedLimit30Finder.Succeeded())
++
++  if (TSubclassOf<AActor> Loaded = LoadBlueprintActorClass(
++          TEXT("/Game/Carla/Static/TrafficSign/BP_SpeedLimit30")))
+   {
+-    TSubclassOf<AActor> SpeedLimitModel = SpeedLimit30Finder.Class;
++    TSubclassOf<AActor> SpeedLimitModel = Loaded;
+     SpeedLimitModels.Add("30", SpeedLimitModel);
+   }
+-  static ConstructorHelpers::FClassFinder<AActor> SpeedLimit40Finder(
+-      TEXT( "/Game/Carla/Static/TrafficSign/BP_SpeedLimit40" ) );
+-  if (SpeedLimit40Finder.Succeeded())
++
++  if (TSubclassOf<AActor> Loaded = LoadBlueprintActorClass(
++          TEXT("/Game/Carla/Static/TrafficSign/BP_SpeedLimit40")))
+   {
+-    TSubclassOf<AActor> SpeedLimitModel = SpeedLimit40Finder.Class;
++    TSubclassOf<AActor> SpeedLimitModel = Loaded;
+     SpeedLimitModels.Add("40", SpeedLimitModel);
+   }
+-  static ConstructorHelpers::FClassFinder<AActor> SpeedLimit50Finder(
+-      TEXT( "/Game/Carla/Static/TrafficSign/BP_SpeedLimit50" ) );
+-  if (SpeedLimit50Finder.Succeeded())
++
++  if (TSubclassOf<AActor> Loaded = LoadBlueprintActorClass(
++          TEXT("/Game/Carla/Static/TrafficSign/BP_SpeedLimit50")))
+   {
+-    TSubclassOf<AActor> SpeedLimitModel = SpeedLimit50Finder.Class;
++    TSubclassOf<AActor> SpeedLimitModel = Loaded;
+     SpeedLimitModels.Add("50", SpeedLimitModel);
+   }
+-  static ConstructorHelpers::FClassFinder<AActor> SpeedLimit60Finder(
+-      TEXT( "/Game/Carla/Static/TrafficSign/BP_SpeedLimit60" ) );
+-  if (SpeedLimit60Finder.Succeeded())
++
++  if (TSubclassOf<AActor> Loaded = LoadBlueprintActorClass(
++          TEXT("/Game/Carla/Static/TrafficSign/BP_SpeedLimit60")))
+   {
+-    TSubclassOf<AActor> SpeedLimitModel = SpeedLimit60Finder.Class;
++    TSubclassOf<AActor> SpeedLimitModel = Loaded;
+     SpeedLimitModels.Add("60", SpeedLimitModel);
+   }
+-  static ConstructorHelpers::FClassFinder<AActor> SpeedLimit70Finder(
+-      TEXT( "/Game/Carla/Static/TrafficSign/BP_SpeedLimit70" ) );
+-  if (SpeedLimit70Finder.Succeeded())
++
++  if (TSubclassOf<AActor> Loaded = LoadBlueprintActorClass(
++          TEXT("/Game/Carla/Static/TrafficSign/BP_SpeedLimit70")))
+   {
+-    TSubclassOf<AActor> SpeedLimitModel = SpeedLimit70Finder.Class;
++    TSubclassOf<AActor> SpeedLimitModel = Loaded;
+     SpeedLimitModels.Add("70", SpeedLimitModel);
+   }
+-  static ConstructorHelpers::FClassFinder<AActor> SpeedLimit80Finder(
+-      TEXT( "/Game/Carla/Static/TrafficSign/BP_SpeedLimit80" ) );
+-  if (SpeedLimit80Finder.Succeeded())
++
++  if (TSubclassOf<AActor> Loaded = LoadBlueprintActorClass(
++          TEXT("/Game/Carla/Static/TrafficSign/BP_SpeedLimit80")))
+   {
+-    TSubclassOf<AActor> SpeedLimitModel = SpeedLimit80Finder.Class;
++    TSubclassOf<AActor> SpeedLimitModel = Loaded;
+     SpeedLimitModels.Add("80", SpeedLimitModel);
+   }
+-  static ConstructorHelpers::FClassFinder<AActor> SpeedLimit90Finder(
+-      TEXT( "/Game/Carla/Static/TrafficSign/BP_SpeedLimit90" ) );
+-  if (SpeedLimit90Finder.Succeeded())
++
++  if (TSubclassOf<AActor> Loaded = LoadBlueprintActorClass(
++          TEXT("/Game/Carla/Static/TrafficSign/BP_SpeedLimit90")))
+   {
+-    TSubclassOf<AActor> SpeedLimitModel = SpeedLimit90Finder.Class;
++    TSubclassOf<AActor> SpeedLimitModel = Loaded;
+     SpeedLimitModels.Add("90", SpeedLimitModel);
+   }
+-  static ConstructorHelpers::FClassFinder<AActor> SpeedLimit100Finder(
+-      TEXT( "/Game/Carla/Static/TrafficSign/BP_SpeedLimit100" ) );
+-  if (SpeedLimit100Finder.Succeeded())
++
++  if (TSubclassOf<AActor> Loaded = LoadBlueprintActorClass(
++          TEXT("/Game/Carla/Static/TrafficSign/BP_SpeedLimit100")))
+   {
+-    TSubclassOf<AActor> SpeedLimitModel = SpeedLimit100Finder.Class;
++    TSubclassOf<AActor> SpeedLimitModel = Loaded;
+     SpeedLimitModels.Add("100", SpeedLimitModel);
+   }
+-  static ConstructorHelpers::FClassFinder<AActor> SpeedLimit110Finder(
+-      TEXT( "/Game/Carla/Static/TrafficSign/BP_SpeedLimit110" ) );
+-  if (SpeedLimit110Finder.Succeeded())
++
++  if (TSubclassOf<AActor> Loaded = LoadBlueprintActorClass(
++          TEXT("/Game/Carla/Static/TrafficSign/BP_SpeedLimit110")))
+   {
+-    TSubclassOf<AActor> SpeedLimitModel = SpeedLimit110Finder.Class;
++    TSubclassOf<AActor> SpeedLimitModel = Loaded;
+     SpeedLimitModels.Add("110", SpeedLimitModel);
+   }
+-  static ConstructorHelpers::FClassFinder<AActor> SpeedLimit120Finder(
+-      TEXT( "/Game/Carla/Static/TrafficSign/BP_SpeedLimit120" ) );
+-  if (SpeedLimit120Finder.Succeeded())
++
++  if (TSubclassOf<AActor> Loaded = LoadBlueprintActorClass(
++          TEXT("/Game/Carla/Static/TrafficSign/BP_SpeedLimit120")))
+   {
+-    TSubclassOf<AActor> SpeedLimitModel = SpeedLimit120Finder.Class;
++    TSubclassOf<AActor> SpeedLimitModel = Loaded;
+     SpeedLimitModels.Add("120", SpeedLimitModel);
+   }
+-  TrafficLightGroupMissingId = -2;
+ }
+ 
++
+ void ATrafficLightManager::RegisterLightComponentFromOpenDRIVE(UTrafficLightComponent * TrafficLightComponent)
+ {
+   ACarlaGameModeBase *GM = UCarlaStatics::GetGameMode(GetWorld());
+@@ -265,6 +302,8 @@ void ATrafficLightManager::GenerateSignalsAndTrafficLights()
+ {
+   if(!TrafficLightsGenerated)
+   {
++    LoadDefaultModels();
++
+     if(!TrafficLightModel_RHT || !TrafficLightModel_LHT )
+     {
+       UE_LOG(LogCarla, Error, TEXT("Missing TrafficLightModel"));
+diff --git a/Unreal/CarlaUnreal/Plugins/Carla/Source/Carla/Traffic/TrafficLightManager.h b/Unreal/CarlaUnreal/Plugins/Carla/Source/Carla/Traffic/TrafficLightManager.h
+index 042a608d1..060a3b1df 100644
+--- a/Unreal/CarlaUnreal/Plugins/Carla/Source/Carla/Traffic/TrafficLightManager.h
++++ b/Unreal/CarlaUnreal/Plugins/Carla/Source/Carla/Traffic/TrafficLightManager.h
+@@ -97,6 +97,12 @@ private:
+   UPROPERTY(EditAnywhere, Category= "Traffic Light Manager")
+   TSubclassOf<AActor> TrafficLightModel_RHT;
+ 
++  /// Loads the default traffic light and sign blueprints on first use.
++  /// They cannot be loaded in the constructor: see the comment there.
++  void LoadDefaultModels();
++
++  bool bDefaultModelsLoaded = false;
++
+   UPROPERTY(EditAnywhere, Category= "Traffic Light Manager")
+   TSubclassOf<AActor> TrafficLightModel_LHT;
+ 
+diff --git a/Unreal/CarlaUnreal/Plugins/Carla/Source/Carla/Util/CarlaTraceChannels.h b/Unreal/CarlaUnreal/Plugins/Carla/Source/Carla/Util/CarlaTraceChannels.h
+new file mode 100644
+index 000000000..93653fc5e
+--- /dev/null
++++ b/Unreal/CarlaUnreal/Plugins/Carla/Source/Carla/Util/CarlaTraceChannels.h
+@@ -0,0 +1,83 @@
++// Copyright (c) 2026 Computer Vision Center (CVC) at the Universitat Autonoma
++// de Barcelona (UAB).
++//
++// This work is licensed under the terms of the MIT license.
++// For a copy, see <https://opensource.org/licenses/MIT>.
++
++#pragma once
++
++#include "Carla.h"                       // LogCarla
++
++#include <util/ue-header-guard-begin.h>
++#include "Engine/EngineTypes.h"
++#include "Engine/CollisionProfile.h"
++#include "UObject/NameTypes.h"
++#include <util/ue-header-guard-end.h>
++
++/// Collision channels used by CARLA's ray-cast sensors.
++///
++/// CARLA hardcoded ECC_GameTraceChannel2 / 3. Those numeric slots are correct
++/// only for projects shipping CARLA's own DefaultEngine.ini. Epic's City Sample
++/// already owns slots 1..7, so there ECC_GameTraceChannel2 means
++/// "BallisticLandingTarget" with DefaultResponse=ECR_Ignore - which is why every
++/// lidar, semantic lidar, HSS lidar and radar returned exactly zero points while
++/// still delivering frames.
++///
++/// Resolve by the NAME configured in [/Script/Engine.CollisionProfile] instead.
++/// Names are stable across projects; numeric slots are not. Fall back to CARLA's
++/// historical slot when the name is absent, so a stock CARLA project is
++/// unaffected.
++///
++/// The name lookup works in cooked and -game builds: CollisionProfile.cpp
++/// assigns ChannelDisplayNames[EnumIndex] OUTSIDE the WITH_EDITOR guard.
++/// The loop starts at GameTraceChannel1 by choice; IS_VALID_COLLISIONCHANNEL
++/// (`> ECC_Destructible`) would also admit EngineTraceChannel1..6, which are not
++/// project-configurable and are deliberately skipped.
++namespace CarlaTraceChannels
++{
++  inline ECollisionChannel ResolveByName(const FName &Name, ECollisionChannel Fallback)
++  {
++    if (const UCollisionProfile *Profile = UCollisionProfile::Get())
++    {
++      for (int32 Index = static_cast<int32>(ECC_GameTraceChannel1);
++           Index < static_cast<int32>(ECC_OverlapAll_Deprecated);
++           ++Index)
++      {
++        if (Profile->ReturnChannelNameFromContainerIndex(Index) == Name)
++        {
++          UE_LOG(LogCarla, Log, TEXT("CarlaTraceChannels: '%s' -> GameTraceChannel%d"),
++                 *Name.ToString(),
++                 Index - static_cast<int32>(ECC_GameTraceChannel1) + 1);
++          return static_cast<ECollisionChannel>(Index);
++        }
++      }
++    }
++    // Not decoration: this is the only positive test available in -game mode.
++    // A silent fallback would return the BROKEN channel, making "config not
++    // applied" indistinguishable from "C++ not applied".
++    UE_LOG(LogCarla, Warning,
++           TEXT("CarlaTraceChannels: collision channel '%s' is NOT declared in "
++                "[/Script/Engine.CollisionProfile]; falling back to the historical "
++                "slot. Ray-cast sensors will return no points unless that slot "
++                "happens to be correct."),
++           *Name.ToString());
++    return Fallback;
++  }
++
++  /// Blocking trace channel: RayCastLidar, RayCastSemanticLidar, HSSLidar,
++  /// Radar, URayTracer::ProjectPoint. Declared as "SensorTrace".
++  inline ECollisionChannel SensorTrace()
++  {
++    static const ECollisionChannel Channel =
++        ResolveByName(FName(TEXT("SensorTrace")), ECC_GameTraceChannel2);
++    return Channel;
++  }
++
++  /// Overlap trace channel: URayTracer::CastRay. Declared as "OverlapChannel".
++  inline ECollisionChannel SensorOverlap()
++  {
++    static const ECollisionChannel Channel =
++        ResolveByName(FName(TEXT("OverlapChannel")), ECC_GameTraceChannel3);
++    return Channel;
++  }
++}
+diff --git a/Unreal/CarlaUnreal/Plugins/Carla/Source/Carla/Util/RayTracer.cpp b/Unreal/CarlaUnreal/Plugins/Carla/Source/Carla/Util/RayTracer.cpp
+index 29459c72f..287ba980e 100644
+--- a/Unreal/CarlaUnreal/Plugins/Carla/Source/Carla/Util/RayTracer.cpp
++++ b/Unreal/CarlaUnreal/Plugins/Carla/Source/Carla/Util/RayTracer.cpp
+@@ -8,6 +8,7 @@
+ #include "Carla.h"
+ #include "Carla/Game/CarlaStatics.h"
+ #include "Carla/Game/Tagger.h"
++#include "Carla/Util/CarlaTraceChannels.h"
+ 
+ 
+ namespace crp = carla::rpc;
+@@ -20,7 +21,7 @@ std::vector<crp::LabelledPoint> URayTracer::CastRay(
+       OutHits,
+       StartLocation,
+       EndLocation,
+-      ECC_GameTraceChannel3, // overlap channel
++      CarlaTraceChannels::SensorOverlap(), // "OverlapChannel"
+       FCollisionQueryParams(),
+       FCollisionResponseParams()
+   );
+@@ -51,7 +52,7 @@ std::pair<bool, crp::LabelledPoint> URayTracer::ProjectPoint(
+       Hit,
+       StartLocation,
+       StartLocation + Direction.GetSafeNormal() * MaxDistance,
+-      ECC_GameTraceChannel2, // camera
++      CarlaTraceChannels::SensorTrace(), // "SensorTrace"
+       FCollisionQueryParams(),
+       FCollisionResponseParams()
+   );
+diff --git a/Unreal/CarlaUnreal/Plugins/Carla/Source/Carla/Vehicle/MovementComponents/ChronoMovementComponent.cpp b/Unreal/CarlaUnreal/Plugins/Carla/Source/Carla/Vehicle/MovementComponents/ChronoMovementComponent.cpp
+index d5e9a8dfb..dc0bc2fff 100644
+--- a/Unreal/CarlaUnreal/Plugins/Carla/Source/Carla/Vehicle/MovementComponents/ChronoMovementComponent.cpp
++++ b/Unreal/CarlaUnreal/Plugins/Carla/Source/Carla/Vehicle/MovementComponents/ChronoMovementComponent.cpp
+@@ -9,6 +9,7 @@
+ #include "Carla/Vehicle/CarlaWheeledVehicle.h"
+ #include "Carla/Vehicle/MovementComponents/DefaultMovementComponent.h"
+ #include "Carla/Util/RayTracer.h"
++#include "Carla/Util/CarlaTraceChannels.h"
+ 
+ #include <util/disable-ue4-macros.h>
+ #include <carla/rpc/String.h>
+@@ -104,7 +105,7 @@ std::pair<bool, FHitResult>
+       Hit,
+       StartLocation,
+       EndLocation,
+-      ECC_GameTraceChannel2, // camera (any collision)
++      CarlaTraceChannels::SensorTrace(), // "SensorTrace"
+       CollisionQueryParams,
+       FCollisionResponseParams()
+   );

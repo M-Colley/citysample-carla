@@ -1,0 +1,51 @@
+# ---------------------------------------------------------------------------
+# City Sample-derived data - MUST NOT be redistributed
+# ---------------------------------------------------------------------------
+# Everything below is extracted from, or computed from, Epic's City Sample
+# content. The Fab/Epic Content licence lets you use it in your own project; it
+# does not let you republish it, and a road network or a navmesh derived from
+# it is still derived from it. Anyone using this repository generates these
+# files themselves from their own City Sample install - that is what the tools
+# in tools/ are for, and it takes a few minutes.
+#
+# Deliberately listed one by one rather than by extension: a new derived
+# artifact should have to be added here consciously.
+zonegraph*.json
+roadnetwork*.json
+lights*.json
+*.xodr
+*.obj
+*.bin
+SmallCity.png
+
+# Screenshots and renders of City Sample content
+shots/
+out/
+*-rgb.png
+*-seg.png
+*.mp4
+*.gif
+# ...except the one showcase clip, which IS part of the repo.
+!docs/citysample-carla.mp4
+!docs/citysample-carla.gif
+
+# ---------------------------------------------------------------------------
+# Local machine state
+# ---------------------------------------------------------------------------
+logs/
+venv-carla/
+snapshots/
+__pycache__/
+*.pyc
+.carla-python
+
+# Unreal build output, in case a plugin is ever built in place
+plugins/*/Binaries/
+plugins/*/Intermediate/
+CityRoadExport/Binaries/
+CityRoadExport/Intermediate/
+carlamayo-deferred/
+
+# Machine-survey scratch, not part of the pipeline
+tools/cpu_soak.py
+tools/run-survey.ps1

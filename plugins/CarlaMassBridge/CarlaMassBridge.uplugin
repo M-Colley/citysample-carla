@@ -1,0 +1,41 @@
+{
+    "FileVersion": 3,
+    "Version": 1,
+    "VersionName": "0.1",
+    "FriendlyName": "CARLA Mass Bridge",
+    "Description": "Mirrors Epic's MassTraffic ECS entities into CARLA's actor registry as dormant proxies, so world.get_actors() reports the traffic that is actually rendered.",
+    "Category": "Simulation",
+    "CreatedBy": "City Sample -> CARLA",
+    "CanContainContent": false,
+    "IsBetaVersion": true,
+    "Installed": false,
+    "Modules": [
+        {
+            "Name": "CarlaMassBridge",
+            "Type": "Runtime",
+            "LoadingPhase": "Default"
+        }
+    ],
+    "Plugins": [
+        {
+            "Name": "MassGameplay",
+            "Enabled": true
+        },
+        {
+            "Name": "MassAI",
+            "Enabled": true
+        },
+        {
+            "Name": "Traffic",
+            "Enabled": true
+        },
+        {
+            "Name": "Carla",
+            "Enabled": true
+        },
+        {
+            "Name": "FastGeoStreaming",
+            "Enabled": true
+        }
+    ]
+}

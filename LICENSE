@@ -1,0 +1,40 @@
+MIT License
+
+Copyright (c) 2026 Mark Colley
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+-------------------------------------------------------------------------------
+
+This licence covers the code and documentation in THIS repository only.
+
+It does not cover, and this repository does not redistribute:
+
+  * Epic Games' City Sample content, which is licensed under the Unreal Engine
+    EULA / Epic Content Licence and must be obtained from Fab;
+  * Unreal Engine, or the CARLA fork of it;
+  * CARLA itself, which is MIT-licensed by the Computer Vision Center (CVC) at
+    the Universitat Autonoma de Barcelona.
+
+Data derived from City Sample content — the extracted road network
+(`zonegraph*.json`, `roadnetwork*.json`), the OpenDRIVE files (`*.xodr`), the
+traffic-light table (`lights-*.json`) and the pedestrian navmesh
+(`*.obj`, `*.bin`) — is derived from Epic's content and is therefore NOT
+included here and NOT covered by this licence. The tools in `tools/` regenerate
+all of it from your own City Sample install in a few minutes.
