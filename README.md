@@ -843,40 +843,53 @@ distance in 15 s   : median 21.0 m  (= the 1.4 m/s max speed set)
 ---
 
 
-## 9. Using this with Carlamayo (or any 0.9.x client)
+## 9. Using this with Carlamayo
 
-The reason this project exists, from the Carlamayo side, was that the City
+Carlamayo's **`CARLA0.10.0-Alpamayo`** branch already targets CARLA 0.10.0
+(`CARLA_VERSION = "0.10.0"`), so there is no client-version gap to close — use
+that branch, with the 0.10.0 wheel built from your own tree
+(`Build/PythonAPI/dist/carla-0.10.0-*.whl`).
+
+The reason this project started, from the Carlamayo side, was that the City
 Sample had no OpenDRIVE: `world.get_map()` raised `failed to generate map`,
-`get_spawn_points()` was empty, and the Traffic Manager could not run. That is
-fixed — the `MAP_HAS_OPENDRIVE = False` workaround in
-`0001-carlamayo-opendrive-optional.patch` is no longer needed for this map.
+`get_spawn_points()` was empty, and neither the Traffic Manager nor the walkers
+could run. That is fixed, and the `MAP_HAS_OPENDRIVE = False` workaround in
+`0001-carlamayo-opendrive-optional.patch` is obsolete — the 0.10.0 branch does
+not carry it and no longer needs it.
 
-What is ready:
+What Carlamayo asks of a map, and what it gets here:
 
-| Carlamayo needs | Status |
+| Carlamayo does | Status on this map |
 |---|---|
 | `world.get_map()` | 2,945 road segments |
 | `get_spawn_points()` | 2,945 |
-| `NPC_WALKER_COUNT` (needs a navmesh) | 608 tiles, walkers spawn and walk |
-| Camera / depth / LiDAR / radar | all working |
-| Traffic lights for intersection behaviour | 353, phased, cycling |
+| `get_random_location_from_navigation()` for walkers | works — 608 navmesh tiles |
+| `synchronous_mode` + `fixed_delta_seconds = CONTROL_DT` | fine; the recorder does the same |
+| 4 cameras at 1080×1920 | works, but see the note on frame rate below |
 
-Two things still stand between this and a Carlamayo run:
+Three settings to change:
 
-1. **Client version.** Carlamayo pins `carla==0.9.16` and this server is
-   **0.10.0**. The RPC protocol is not compatible across that gap, so the
-   0.9.16 wheel cannot talk to this server. You need the 0.10.0 client built
-   from your own tree (`Build/PythonAPI/dist/carla-0.10.0-*.whl`) and whatever
-   API changes that implies for Carlamayo. This is the real gate, and it has
-   nothing to do with the City Sample.
-2. **`NPC_VEHICLE_COUNT = 50` will decay.** Autopilot destroys vehicles on this
-   map (issue 9). Set it to `0` and use Epic's traffic instead — with
-   `carla.MassBridge.Enable 1` the city's own vehicles and pedestrians are
-   already in `world.get_actors()`, which is closer to what you want anyway:
-   hundreds of agents, driven by Epic's Mass simulation rather than by CARLA's
-   Traffic Manager.
+1. **`CARLA_MAP = "Small_City_LVL"`.** This one matters more than it looks.
+   `carla_interface.py` guards its reload with `if map_name not in current_map:`
+   and the server reports `Map/Small_City_LVL`, so that value makes the guard
+   skip `load_world` and attach to the running city. Leave it at
+   `"Town10HD_Opt"` and Carlamayo will load a CARLA town **over** the City
+   Sample — throwing away the thing you built.
+2. **`NPC_VEHICLE_COUNT = 0`.** Carlamayo spawns NPCs with
+   `SpawnActor(...).then(SetAutopilot(...))`, and autopilot decays on this map
+   (issue 9): vehicles are destroyed mid-drive. Turn the Mass bridge on instead
+   (`-ExecCmds "carla.MassBridge.Enable 1"`) and Epic's own traffic — hundreds
+   of Mass-driven vehicles and pedestrians, the nearest 250 of them mirrored
+   into `world.get_actors()` — is already there, which is closer to what you
+   want than 50 TM-driven NPCs.
+3. **`NPC_WALKER_COUNT` can stay at 50.** It uses
+   `get_random_location_from_navigation()` and walker controllers, which now
+   work. Keep it if you want walkers you control; drop it to 0 if Epic's crowd
+   through the bridge is enough.
 
-Everything else Carlamayo asks of a map is in place.
+**On frame rate.** The server runs about 17 Hz with the tagger and the bridge
+on at Epic quality. Four 1080×1920 cameras on top of that will cost more —
+budget accordingly, or drop `-Quality` to `Medium`.
 
 ---
 
