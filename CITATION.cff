@@ -1,0 +1,29 @@
+cff-version: 1.2.0
+title: "citysample-carla: running Epic's City Sample as a CARLA simulator"
+message: "If you use this software, please cite it as below."
+type: software
+authors:
+  - family-names: Colley
+    given-names: Mark
+    # Add your ORCID here if you want it on the Zenodo record:
+    # orcid: "https://orcid.org/0000-0000-0000-0000"
+repository-code: "https://github.com/M-Colley/citysample-carla"
+abstract: >-
+  Tooling that runs Epic Games' City Sample (Unreal Engine 5.8) as a CARLA
+  0.10.0 driving simulator, and extracts the city's road network as ASAM
+  OpenDRIVE so it can be driven in any CARLA. Includes an Unreal plugin that
+  exports Epic's ZoneGraph, converters that produce OpenDRIVE with traffic
+  lights, stop signs and crosswalks, a bridge that makes Epic's Mass ECS
+  traffic and crowd visible to the CARLA API, a semantic tagger for geometry
+  streamed through FastGeoStreaming, and a pedestrian navmesh builder. No Epic
+  Games content is redistributed.
+keywords:
+  - CARLA
+  - Unreal Engine
+  - City Sample
+  - autonomous driving
+  - driving simulator
+  - OpenDRIVE
+  - semantic segmentation
+  - LiDAR
+license: MIT

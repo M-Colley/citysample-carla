@@ -1,0 +1,33 @@
+{
+  "title": "citysample-carla: running Epic's City Sample as a CARLA simulator",
+  "description": "<p>Tooling that runs Epic Games' City Sample (Unreal Engine 5.8) as a CARLA 0.10.0 driving simulator, and extracts the city's road network as ASAM OpenDRIVE so it can be driven in any CARLA.</p><p>Part A exports Epic's ZoneGraph through a small Unreal plugin and converts it to OpenDRIVE: 3,337 roads, 172 junctions, 145 km, 2,861 spawn points, with paramPoly3 endpoint continuity verified to 2.45e-5 m across 5,452 joins. Part B hosts the level itself as a CARLA server, which required fixing several CARLA features that assume a map CARLA authored: ray-cast sensors returned nothing because of a hardcoded collision channel; semantic segmentation labelled almost nothing because City Sample streams its geometry through Epic's FastGeoStreaming as non-UObject primitives that CARLA's tagger cannot reach; traffic lights, crosswalks and stop signs had to be derived from Epic's own authored signal data; Epic's Mass ECS traffic and crowd were invisible to world.get_actors(); and pedestrian navigation was dead for three independent and silent reasons.</p><p>Measured results: LiDAR 0 to 232,584 points, radar 0 to 1,980 detections, camera semantic segmentation 98.8% to 0.5% unlabeled, semantic LiDAR 99.1% to 3.3% unlabeled, 353 traffic lights across 106 junctions plus 229 stop signs across the other 66, 1,096 crosswalks, 608 navmesh tiles with walkers spawning and navigating, and 250 of Epic's Mass entities mirrored into the CARLA actor registry.</p><p>Nine reproducible CARLA defects found during the work are documented and filed upstream.</p><p>No Epic Games content, and no data derived from it, is included: the tools regenerate everything from the user's own City Sample installation.</p>",
+  "license": "MIT",
+  "upload_type": "software",
+  "access_right": "open",
+  "creators": [
+    {
+      "name": "Colley, Mark"
+    }
+  ],
+  "keywords": [
+    "CARLA",
+    "Unreal Engine",
+    "City Sample",
+    "autonomous driving",
+    "driving simulator",
+    "OpenDRIVE",
+    "ASAM OpenDRIVE",
+    "semantic segmentation",
+    "LiDAR",
+    "simulation",
+    "ZoneGraph",
+    "digital twin"
+  ],
+  "related_identifiers": [
+    {
+      "identifier": "https://github.com/carla-simulator/carla/issues/9852",
+      "relation": "isSupplementTo",
+      "scheme": "url"
+    }
+  ]
+}

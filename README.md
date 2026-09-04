@@ -40,7 +40,7 @@ Background: [carla#9852](https://github.com/carla-simulator/carla/issues/9852).
 > | `-ExecCmds "carla.MassBridge.Enable 1"` | Epic's traffic *and crowd* visible to `world.get_actors()` | §3.9 |
 > | a built navmesh in `Content\Map\Nav\` | walkers and `get_random_location_from_navigation()` | §3.11 |
 >
-> **Known gaps, measured on the running server (§10):**
+> **Known gaps, measured on the running server (§11):**
 >
 > - **Semantic LiDAR is still unlabeled.** The FastGeo tagger fixes the
 >   *camera*, which reads labels from custom primitive data. Semantic LiDAR
@@ -460,7 +460,7 @@ with a coarse `Static` if a view is dominated by them.
 Note that this only fixes the **camera**. Semantic *LiDAR* tags come from the
 physics hit's component, a different code path that also cannot see FastGeo
 primitives — so semantic LiDAR still returns mostly tag 0. See
-[Known limitations](#10-known-limitations).
+[Known limitations](#11-known-limitations).
 
 ---
 
@@ -623,7 +623,17 @@ problems, and this is the second one.
 
 ---
 
-## 6. Licensing
+## 6. Citing this
+
+[![DOI](https://zenodo.org/badge/DOI/PLACEHOLDER.svg)](https://doi.org/PLACEHOLDER)
+
+`CITATION.cff` carries the metadata; GitHub renders a "Cite this repository"
+button from it, and Zenodo mints a DOI per release. Replace the two
+`PLACEHOLDER`s above with the DOI once the first release is archived.
+
+---
+
+## 7. Licensing
 
 The **tools here are yours to use and share.** They contain no Epic content.
 
@@ -638,7 +648,7 @@ Programs"*. Extracted road networks are derived from it. So:
 
 ---
 
-## 7. Repository layout
+## 8. Repository layout
 
 ```
 CityRoadExport/          UE 5.8 plugin (C++)  ->  -run=ExportZoneGraph
@@ -683,6 +693,8 @@ tools/
   archive/                       superseded attempts, kept for the record
 AGENTS.md                conventions and traps, for anyone (or anything)
                          editing this repo
+CITATION.cff             citation metadata; GitHub renders a Cite button
+.zenodo.json             what Zenodo records when it archives a release
 ISSUES-TO-FILE.md        nine reproducible CARLA bugs found on the way
 docs/
   IMPLEMENTATION-PLAN.md         the design and its evidence, stage by stage
@@ -709,7 +721,7 @@ than your CARLA checkout, because a build of stale code succeeds silently.
 
 ---
 
-## 8. How this was validated
+## 9. How this was validated
 
 **The road network**, in CARLA 0.9.16 from `generate_opendrive_world`:
 
@@ -865,7 +877,7 @@ distance in 15 s   : median 21.0 m  (= the 1.4 m/s max speed set)
 ---
 
 
-## 9. Using this with Carlamayo
+## 10. Using this with Carlamayo
 
 Carlamayo's **`CARLA0.10.0-Alpamayo`** branch already targets CARLA 0.10.0
 (`CARLA_VERSION = "0.10.0"`), so there is no client-version gap to close — use
@@ -915,7 +927,7 @@ budget accordingly, or drop `-Quality` to `Medium`.
 
 ---
 
-## 10. Known limitations
+## 11. Known limitations
 
 Everything here was measured on the running server, not inferred.
 
