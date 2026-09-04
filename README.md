@@ -686,7 +686,6 @@ AGENTS.md                conventions and traps, for anyone (or anything)
 ISSUES-TO-FILE.md        nine reproducible CARLA bugs found on the way
 docs/
   IMPLEMENTATION-PLAN.md         the design and its evidence, stage by stage
-  carla-9852-reply.md            a write-up to post on the upstream thread
 ```
 
 Everything derived from City Sample content — `zonegraph*.json`,
