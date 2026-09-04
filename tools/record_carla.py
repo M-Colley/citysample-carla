@@ -51,6 +51,11 @@ try:
 except ImportError:
     sys.exit("record_carla.py needs pillow: pip install pillow")
 
+# One quadrant, 16:9. The finished frame is 2x this plus a HUD strip, so 640
+# gives 1280x754 and 960 gives 1920x1114. Overridden by --panel-width: the
+# per-panel labels and the HUD are drawn at a fixed pixel size, so a larger
+# panel is the only way to make them legible after a platform re-encodes the
+# video at its own bitrate.
 PANEL_W, PANEL_H = 640, 360
 LIGHT_COLOUR = {"Red": (220, 60, 60), "Yellow": (230, 200, 70),
                 "Green": (90, 200, 110), "Off": (150, 150, 150),
@@ -187,6 +192,9 @@ def ego_light_state(ego) -> str:
 
 
 def main() -> int:
+    # --panel-width rebinds these, and the argparse default below reads them,
+    # so the declaration has to come before the first mention either way.
+    global PANEL_W, PANEL_H
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[1])
     ap.add_argument("--host", default="127.0.0.1")
     ap.add_argument("--port", type=int, default=2000)
@@ -198,6 +206,10 @@ def main() -> int:
     ap.add_argument("--walkers", type=int, default=40)
     ap.add_argument("--kmh", type=float, default=28.0,
                     help="target speed for the ego's route follower")
+    ap.add_argument("--panel-width", type=int, default=PANEL_W,
+                    help=f"width of one of the four panels (default {PANEL_W}); "
+                         f"the frame is 2x this wide. 960 gives a 1920-wide "
+                         f"frame, which survives re-encoding better")
     ap.add_argument("--settle", type=float, default=30.0,
                     help="seconds of streaming before recording starts; the "
                          "world is unlabelled and half-loaded before this")
@@ -208,6 +220,12 @@ def main() -> int:
     ap.add_argument("--gif", action="store_true",
                     help="also write a smaller .gif next to the .mp4")
     args = ap.parse_args()
+
+    # Set before anything reads them: the panel helpers and the LiDAR
+    # projection all size themselves from these.
+    PANEL_W = max(160, args.panel_width - args.panel_width % 2)
+    PANEL_H = PANEL_W * 9 // 16
+    PANEL_H -= PANEL_H % 2
 
     client = carla.Client(args.host, args.port)
     client.set_timeout(args.timeout)
