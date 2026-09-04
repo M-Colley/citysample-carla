@@ -67,21 +67,25 @@ def check_disk(part_a: bool = False) -> None:
         except OSError:
             continue
         free_gb = free / 2**30
+        # Part A never builds the engine or CARLA - it only needs room beside an
+        # existing City Sample project - so holding it to the part B figure
+        # reports a blocker that is not one.
+        need = PART_A_GB if part_a else TOTAL_GB
+        floor = 0 if part_a else UE_BUILD_GB
         # A build that only just fits will fail partway through: cooking and the
         # Zen store need slack on top of the finished tree. Want 15% headroom.
-        comfortable = TOTAL_GB * 1.15
-        if free_gb >= comfortable:
+        if free_gb >= need * 1.15:
             status, note = OK, ""
-        elif free_gb >= TOTAL_GB:
+        elif free_gb >= need:
             status = WARN
-            note = f" -- only {free_gb - TOTAL_GB:,.0f} GiB spare; cooking needs slack"
-        elif free_gb >= UE_BUILD_GB:
+            note = f" -- only {free_gb - need:,.0f} GiB spare; cooking needs slack"
+        elif free_gb >= floor:
             status = WARN
             note = " -- enough for the engine, not for engine + CARLA + City Sample"
         else:
-            status, note = BAD, " -- below the 225 GiB the engine alone needs"
+            status, note = BAD, f" -- below the {need} GiB this needs"
         record(status, f"disk {drive}",
-               f"{free_gb:,.0f} GiB free (need ~{TOTAL_GB} GiB total){note}")
+               f"{free_gb:,.0f} GiB free (need ~{need} GiB{'' if part_a else ' total'}){note}")
 
 
 def check_gpu() -> None:

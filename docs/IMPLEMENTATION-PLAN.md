@@ -31,7 +31,7 @@ All load-bearing facts re-verified against the live system. Every baseline repro
 ```
 $ powershell Get-CimInstance Win32_Process -Filter "Name='UnrealEditor.exe'" | Select CommandLine
 "C:\carla-ue58\UnrealEngine5_carla\Engine\Binaries\Win64\UnrealEditor.exe"
-"C:\Users\localadmin\Documents\Unreal Projects\CitySample\CitySample.uproject"
+"<CitySample>\CitySample.uproject"
 /Game/Map/Small_City_LVL?game=/Game/Carla/Blueprints/Game/CarlaGameMode.CarlaGameMode_C
 -game -carla-server -carla-rpc-port=2000 -quality-level=Epic -nosound -NoLiveCoding
 -nosplash -unattended -stdout -FullStdOutLogOutput -windowed -ResX=1600 -ResY=900
@@ -118,7 +118,7 @@ Two corrections to the critiques themselves, from the same reads:
 
 ### ═══ STAGE 0 — OpenDRIVE signals & crosswalks (offline, no build, no restart) ═══
 
-**0.1 [create]** `C:/Users/localadmin/Desktop/unreal city/tools/masstraffic_lights_to_json.py`
+**0.1 [create]** `<repo>/tools/masstraffic_lights_to_json.py`
 
 Use the spec's file **with these three mandatory fixes**:
 
@@ -257,10 +257,10 @@ Add `--lights` and `--signal-inertial` per the spec; print the three new counts.
 **RUN IT:**
 
 ```
-cd "C:/Users/localadmin/Desktop/unreal city"
-PY="C:/Users/localadmin/AppData/Local/Programs/Python/Python313/python.exe"
+cd "<repo>"
+PY=python
 "$PY" tools/masstraffic_lights_to_json.py --selftest
-"$PY" tools/masstraffic_lights_to_json.py "C:/Users/localadmin/Documents/Unreal Projects/CitySample/Content/AI/Traffic/TrafficLights/CitySampleSmallCityTrafficLights.uasset" -o lights-small-city.json
+"$PY" tools/masstraffic_lights_to_json.py "<CitySample>/Content/AI/Traffic/TrafficLights/CitySampleSmallCityTrafficLights.uasset" -o lights-small-city.json
 "$PY" tools/zonegraph_to_roadnetwork.py zonegraph-small-city.json -o roadnetwork-small-city.json
 "$PY" tools/roadnetwork_to_xodr.py roadnetwork-small-city.json --name SmallCity --lights lights-small-city.json -o SmallCity.xodr
 ```
@@ -598,15 +598,15 @@ Separately, `C:/carla-ue58/carla/Unreal/CarlaUnreal/Config/DefaultEngine.ini:114
 #### 1.13 BUILD AND RESTART
 
 ```
-"C:/carla-ue58/UnrealEngine5_carla/Engine/Build/BatchFiles/Build.bat" CitySampleEditor Win64 Development -Project="C:/Users/localadmin/Documents/Unreal Projects/CitySample/CitySample.uproject" -WaitMutex
+"C:/carla-ue58/UnrealEngine5_carla/Engine/Build/BatchFiles/Build.bat" CitySampleEditor Win64 Development -Project="<CitySample>/CitySample.uproject" -WaitMutex
 ```
-Expect `Build succeeded`. Then relaunch: `powershell -File "C:/Users/localadmin/Desktop/unreal city/tools/Run-CarlaCity.ps1"`.
+Expect `Build succeeded`. Then relaunch: `powershell -File "<repo>/tools/Run-CarlaCity.ps1"`.
 
 #### 1.14 VERIFY — three independent suites
 
 **V1a — did the channels register?** (`grep -c "LogCollisionProfile" logs/run-carlacity.log` is **0** today, so "expect no warnings" is a null test. This is the positive test:)
 ```
-grep -n "CarlaTraceChannels" "C:/Users/localadmin/Desktop/unreal city/logs/run-carlacity.log"
+grep -n "CarlaTraceChannels" "<repo>/logs/run-carlacity.log"
 ```
 EXPECT exactly two `Log` lines: `'SensorTrace' -> GameTraceChannel9` and `'OverlapChannel' -> GameTraceChannel10`. A `Warning` line means the ini half did not take. Also assert still zero of `Cannot map multiple responses to the same collision channel` and `Custom Channel Name = ... hasn't been found`.
 
@@ -631,7 +631,7 @@ len(w.cast_ray(a, b))                                    # 150 m horizontal ray:
 
 **V1d — segmentation encoding.** Re-run the existing probe:
 ```
-"C:/Users/localadmin/AppData/Local/Programs/Python/Python313/python.exe" <scratchpad>/seg_probe7.py
+python <scratchpad>/seg_probe7.py
 ```
 BEFORE (measured, CVar at 0): `pct>29` was 8.66-15.11% at 256-512 px and **100.00%** at 600-1024 px, `distinct` 217-256 at every resolution.
 PASS: `pct(R>29) == 0.00%` at every resolution **and** `distinct <= 30`, **and** two consecutive frames from a static camera are byte-identical (today 3080 pixels differ at 400x300).
@@ -660,8 +660,8 @@ Every `/Game/Road/*`, `/Game/Prop/Kit_*` and `/Game/Building/*` mesh must be **a
 ### ═══ STAGE 2 — deploy the .xodr (no build, one restart) ═══
 
 ```
-cp "C:/Users/localadmin/Desktop/unreal city/SmallCity.xodr" \
-   "C:/Users/localadmin/Documents/Unreal Projects/CitySample/Saved/OpenDrive/Small_City_LVL.xodr"
+cp "<repo>/SmallCity.xodr" \
+   "<CitySample>/Saved/OpenDrive/Small_City_LVL.xodr"
 ```
 Restart the server — the `.xodr` is read once at map load; there is no live reload.
 

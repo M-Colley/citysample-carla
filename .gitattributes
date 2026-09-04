@@ -1,0 +1,29 @@
+# Normalise to LF in the repository, and check out what each tool needs.
+#
+# Without this the repo churns: a Windows clone with core.autocrlf=true rewrites
+# every file on checkout, so the next `git diff` shows changes nobody made, and
+# a patch generated on one machine will not apply on another.
+* text=auto eol=lf
+
+# Windows wants CRLF. A .bat with LF endings can fail outright - cmd.exe reads
+# a trailing CR as part of a label or a `set` value.
+*.bat  text eol=crlf
+*.cmd  text eol=crlf
+*.ps1  text eol=crlf
+
+# Anything run through bash must keep LF, including on Windows: `#!/usr/bin/env
+# bash\r` is not a valid interpreter path, and the error names a program that
+# looks correct.
+*.sh   text eol=lf
+
+# The CARLA patch must be byte-exact or `git apply` rejects it. Diff context
+# lines have to match the target file's bytes, so never let git touch these.
+*.patch  -text
+*.diff   -text
+
+# Binary, so git neither diffs nor converts them.
+*.mp4  binary
+*.gif  binary
+*.png  binary
+*.uasset binary
+*.umap   binary

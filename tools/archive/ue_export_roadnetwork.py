@@ -7,7 +7,7 @@ OpenDRIVE.
 Run INSIDE the Unreal editor, not from a normal shell:
 
     Output Log > Cmd dropdown set to "Python":
-        exec(open(r"C:/Users/localadmin/Desktop/unreal city/tools/ue_export_roadnetwork.py").read())
+        exec(open(r"<repo>/tools/ue_export_roadnetwork.py").read())
 
     or headless:
         UnrealEditor-Cmd.exe "<project>/CitySample.uproject" ^

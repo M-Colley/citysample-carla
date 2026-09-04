@@ -182,9 +182,14 @@ matter. A full clone runs at ~67 GB/hr and will fill your disk.
 SetupWithBuildTools.bat --skip-content
 ```
 
-Copy it next to your CARLA checkout first. It replaces `CarlaSetup.bat`,
-which cannot find VS Build Tools (issue 1). **Edit the paths at the top** —
-`CARLA_ROOT` and `VCVARS` are set for one machine.
+Run it **from this repository**, not from your CARLA checkout — it `cd`s to
+`%CARLA_ROOT%` itself, and it finds `toolsetch-carla-content.sh` beside
+itself. It replaces `CarlaSetup.bat`, which cannot find VS Build Tools
+(issue 1).
+
+It picks up `CARLA_DIR` if you set it (same variable as everything else) and
+otherwise assumes `C:\carla-ue58\carla`. `VCVARS` at the top of the file
+assumes VS 2022 **Build Tools**; edit that line if you have the full IDE.
 
 It also requires `CARLA_UNREAL_ENGINE_PATH` to point at your **built** CARLA
 UE 5.8 fork, and exits immediately if it is unset or contains no

@@ -26,10 +26,14 @@ rem   SetupWithBuildTools.bat                 content, then configure and build
 rem   SetupWithBuildTools.bat --skip-content  build only (content handled apart)
 rem ---------------------------------------------------------------------------
 
-set "CARLA_ROOT=C:\carla-ue58\carla"
+rem CARLA_DIR overrides the default, matching the PowerShell tools and the README.
+if not "%CARLA_DIR%"=="" (set "CARLA_ROOT=%CARLA_DIR%") else (set "CARLA_ROOT=C:\carla-ue58\carla")
 set "CONTENT_DIR=%CARLA_ROOT%\Unreal\CarlaUnreal\Content"
 set "VCVARS=%PROGRAMFILES(X86)%\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvars64.bat"
-set "FETCH=C:\Users\localadmin\Desktop\unreal city\tools\fetch-carla-content.sh"
+rem Beside this script, wherever it was copied to (%~dp0 ends with a backslash).
+rem This was an absolute path to one machine, so every other copy went looking
+rem for the fetch script somewhere that did not exist.
+set "FETCH=%~dp0tools\fetch-carla-content.sh"
 
 set "SKIP_CONTENT="
 if /I "%~1"=="--skip-content" set "SKIP_CONTENT=1"
