@@ -19,7 +19,7 @@ There are two halves, and you can stop after the first:
 | **B. The whole city** | CARLA serving the City Sample level itself — buildings, props, lighting. | Also needs CARLA built from source against its UE 5.8 fork. |
 
 **Validated on `Small_City_LVL`:** 3,337 roads · 172 junctions · 145 km ·
-2,945 spawn points · 52-53 of 54 vehicles driving at a median 30 km/h.
+2,861 spawn points · 52-53 of 54 vehicles driving at a median 30 km/h.
 
 Background: [carla#9852](https://github.com/carla-simulator/carla/issues/9852).
 
@@ -681,9 +681,12 @@ tools/
   doctor.py                      prerequisite check
   Install-NetFxSdk.ps1           fixes the NetFxSDK build blocker
   archive/                       superseded attempts, kept for the record
+AGENTS.md                conventions and traps, for anyone (or anything)
+                         editing this repo
 ISSUES-TO-FILE.md        nine reproducible CARLA bugs found on the way
 docs/
   IMPLEMENTATION-PLAN.md         the design and its evidence, stage by stage
+  carla-9852-reply.md            a write-up to post on the upstream thread
 ```
 
 Everything derived from City Sample content — `zonegraph*.json`,
@@ -712,8 +715,8 @@ than your CARLA checkout, because a build of stale code succeeds silently.
 **The road network**, in CARLA 0.9.16 from `generate_opendrive_world`:
 
 ```
-topology segments : 2,945      waypoints @5m : 33,754 (12,986 in junctions)
-spawn points      : 2,945      drive test    : 45.1 m in 6 s, 0.04 m off centre
+topology segments : 2,861      waypoints @5m : 33,754 (12,986 in junctions)
+spawn points      : 2,861      drive test    : 45.1 m in 6 s, 0.04 m off centre
 traffic manager   : 41/58 alive, 41/41 moving, 28-29 km/h (limit 30)
 ```
 
@@ -775,7 +778,7 @@ of a correct junction can legitimately show every light red.
 
 ```
 map           : Map/Small_City_LVL
-spawn points  : 2,945      road segments : 2,945
+spawn points  : 2,861      road segments : 2,861
 extent        : 1,662 x 1,302 m
 traffic       : 59/60 spawned, 54 alive, 52-53 moving (two runs)
 km/h          : median 30, max 43-51
@@ -881,8 +884,8 @@ What Carlamayo asks of a map, and what it gets here:
 
 | Carlamayo does | Status on this map |
 |---|---|
-| `world.get_map()` | 2,945 road segments |
-| `get_spawn_points()` | 2,945 |
+| `world.get_map()` | 2,861 road segments |
+| `get_spawn_points()` | 2,861 |
 | `get_random_location_from_navigation()` for walkers | works — 608 navmesh tiles |
 | `synchronous_mode` + `fixed_delta_seconds = CONTROL_DT` | fine; the recorder does the same |
 | 4 cameras at 1080×1920 | works, but see the note on frame rate below |
