@@ -8,6 +8,16 @@ authors:
     # Add your ORCID here if you want it on the Zenodo record:
     # orcid: "https://orcid.org/0000-0000-0000-0000"
 repository-code: "https://github.com/M-Colley/citysample-carla"
+doi: "10.5281/zenodo.22306770"
+version: v1.0.0
+date-released: "2026-09-04"
+identifiers:
+  - type: doi
+    value: "10.5281/zenodo.22306770"
+    description: Concept DOI, always resolving to the latest release.
+  - type: doi
+    value: "10.5281/zenodo.22306771"
+    description: DOI for release v1.0.0.
 abstract: >-
   Tooling that runs Epic Games' City Sample (Unreal Engine 5.8) as a CARLA
   0.10.0 driving simulator, and extracts the city's road network as ASAM

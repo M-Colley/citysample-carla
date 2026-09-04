@@ -3,6 +3,9 @@
 Run Epic's **City Sample** as a **CARLA** simulator: real city geometry, real
 CARLA traffic, real CARLA sensors.
 
+[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.22306770.svg)](https://doi.org/10.5281/zenodo.22306770)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+
 ![CARLA driving through the City Sample, four sensors at once](docs/citysample-carla.gif)
 
 *Four synchronised CARLA sensors on Epic's City Sample: RGB, semantic
@@ -625,11 +628,23 @@ problems, and this is the second one.
 
 ## 6. Citing this
 
-[![DOI](https://zenodo.org/badge/DOI/PLACEHOLDER.svg)](https://doi.org/PLACEHOLDER)
+[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.22306770.svg)](https://doi.org/10.5281/zenodo.22306770)
 
-`CITATION.cff` carries the metadata; GitHub renders a "Cite this repository"
-button from it, and Zenodo mints a DOI per release. Replace the two
-`PLACEHOLDER`s above with the DOI once the first release is archived.
+```
+Colley, M. citysample-carla: running Epic's City Sample as a CARLA simulator.
+Zenodo. https://doi.org/10.5281/zenodo.22306770
+```
+
+Two DOIs, and which you want depends on why you are citing:
+
+| | DOI | resolves to |
+|---|---|---|
+| **all versions** | [`10.5281/zenodo.22306770`](https://doi.org/10.5281/zenodo.22306770) | whichever release is newest — use this normally |
+| v1.0.0 | [`10.5281/zenodo.22306771`](https://doi.org/10.5281/zenodo.22306771) | that exact release — use this to pin what you actually ran |
+
+Cite the version DOI in a paper: it is the one that stays reproducible.
+`CITATION.cff` carries both, and GitHub renders a "Cite this repository" button
+from it.
 
 ---
 
