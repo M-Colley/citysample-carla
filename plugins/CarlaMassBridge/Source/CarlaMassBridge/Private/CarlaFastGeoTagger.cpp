@@ -3,8 +3,9 @@
 // This work is licensed under the terms of the MIT license.
 // For a copy, see <https://opensource.org/licenses/MIT>.
 
-#include "CarlaCitySampleLog.h"
 #include "CarlaFastGeoTagger.h"
+
+#include "CarlaCitySampleLog.h"
 
 #include "Carla/Game/Tagger.h"
 
@@ -13,12 +14,14 @@
 #include "FastGeoStaticMeshComponent.h"
 #include "FastGeoInstancedStaticMeshComponent.h"
 #include "FastGeoSkinnedMeshComponent.h"
+#include "FastGeoPhysicsBodyInstanceOwner.h"
 
 #include "Engine/StaticMesh.h"
 #include "Engine/World.h"
 #include "TimerManager.h"
 #include "HAL/IConsoleManager.h"
 #include "UObject/UObjectIterator.h"
+#include "Engine/HitResult.h"
 #include "WorldPartition/WorldPartitionSubsystem.h"
 
 namespace crp = carla::rpc;
@@ -75,6 +78,49 @@ namespace
       return Component.*(&FFastGeoCustomDataAccess::CustomPrimitiveData);
     }
   };
+
+  /// Label for a ray-cast hit on FastGeo geometry.
+  ///
+  /// This is what makes SEMANTIC LIDAR work on this map. The camera reads its
+  /// label on the GPU out of custom primitive data; a ray-casting sensor has
+  /// only an FHitResult, and asks the hit's UPrimitiveComponent for a tag.
+  /// FastGeo geometry has no such component - it owns its FBodyInstances and
+  /// resolves them through IPhysicsBodyInstanceOwner - so every lidar point on
+  /// the city came back Unlabeled while the camera was fully labelled.
+  ///
+  /// FromHitResult walks the hit's Chaos physics object back to the FastGeo
+  /// body owner, which hands over the component. From there the label is the
+  /// same float the tagger already wrote, so the two sensors cannot disagree.
+  ///
+  /// Called once per lidar point - a 64-beam sweep is ~230,000 of them per
+  /// frame - so it does no string work and no allocation: a resolve, a pointer
+  /// chase and one float compare.
+  crp::CityObjectLabel ResolveFastGeoHitLabel(const FHitResult &Hit)
+  {
+    const FFastGeoPhysicsBodyInstanceOwner *Owner =
+        FFastGeoPhysicsBodyInstanceOwner::FromHitResult(Hit);
+    if (Owner == nullptr)
+    {
+      return crp::CityObjectLabel::None;
+    }
+    const FFastGeoPrimitiveComponent *Component = Owner->GetOwnerComponent();
+    if (Component == nullptr)
+    {
+      return crp::CityObjectLabel::None;
+    }
+    const FCustomPrimitiveData &Data = FFastGeoCustomDataAccess::Read(*Component);
+    if (Data.Data.Num() <= kCarlaLabelFloatIndex + 1)
+    {
+      // Not tagged yet - the sweep has not reached it, or the tagger is off.
+      return crp::CityObjectLabel::None;
+    }
+    const float Raw = Data.Data[kCarlaLabelFloatIndex + 1];
+    if (Raw <= 0.0f || Raw > 255.0f)
+    {
+      return crp::CityObjectLabel::None;
+    }
+    return static_cast<crp::CityObjectLabel>(static_cast<uint8>(Raw));
+  }
 }
 
 bool UCarlaFastGeoTaggerSubsystem::DoesSupportWorldType(const EWorldType::Type WorldType) const
@@ -105,6 +151,12 @@ void UCarlaFastGeoTaggerSubsystem::Initialize(FSubsystemCollectionBase &Collecti
             &UCarlaFastGeoTaggerSubsystem::OnStreamingStateUpdated,
             0.5f, true, 0.5f);
     }
+
+    // Teach CARLA's ray-casting sensors how to label FastGeo geometry. Without
+    // this the camera is labelled and the semantic lidar is not, which is a
+    // confusing pair of results to hand anyone.
+    ATagger::SetHitLabelResolver(
+        [](const FHitResult &Hit) { return ResolveFastGeoHitLabel(Hit); });
 }
 
 void UCarlaFastGeoTaggerSubsystem::Deinitialize()
@@ -124,6 +176,9 @@ void UCarlaFastGeoTaggerSubsystem::Deinitialize()
     {
         World->GetTimerManager().ClearTimer(SweepTimerHandle);
     }
+    // The resolver captures nothing that outlives this module, but leaving a
+    // dangling TFunction behind a static would still be a trap on hot reload.
+    ATagger::SetHitLabelResolver(nullptr);
     Super::Deinitialize();
 }
 

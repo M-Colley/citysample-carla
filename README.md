@@ -26,10 +26,11 @@ Background: [carla#9852](https://github.com/carla-simulator/carla/issues/9852).
 > ### ⚠ Read this before collecting any data
 >
 > **Working** — cameras, depth, GNSS, IMU, collision sensors, vehicle control,
-> **LiDAR, semantic LiDAR, HSS LiDAR, radar, `ground_projection`, `cast_ray`**,
-> **353 traffic lights** across 106 junctions, **1,096 crosswalks**, **camera
-> semantic segmentation** (0.5 % unlabeled), **pedestrian navigation**, and
-> **Epic's own traffic and crowd** mirrored into `world.get_actors()`.
+> **LiDAR, radar, `ground_projection`, `cast_ray`**, **353 traffic lights**
+> across 106 junctions and **229 stop signs** across the other 66, **1,096
+> crosswalks**, **camera semantic segmentation** (0.5 % unlabeled), **semantic
+> LiDAR** (3.3 % unlabeled), **pedestrian navigation**, and **Epic's own
+> traffic and crowd** mirrored into `world.get_actors()`.
 >
 > Three of those are **opt-in**, because each one changes what the server does:
 >
@@ -654,7 +655,8 @@ tools/
   plot_xodr.py                   render a network as a PNG
   carla_validate_xodr.py         does traffic route on it?
   masstraffic_lights_to_json.py  Epic's authored lights out of a .uasset  [--selftest]
-  add_signals_to_xodr.py         -> OpenDRIVE signals + controllers      [--selftest]
+  add_signals_to_xodr.py         -> OpenDRIVE signals, controllers and
+                                 stop signs                            [--selftest]
   carla_traffic_lights.py        are the lights there, grouped, cycling?
   xodr_to_recast_obj.py          -> walkable surface for RecastBuilder [--selftest]
   carla_walkers.py               do pedestrians spawn and walk?
@@ -735,14 +737,27 @@ CarlaTraceChannels: 'OverlapChannel' -> GameTraceChannel10
 CarlaTagger: 40 asset-path label rules loaded (builtins on)
 ```
 
-**Traffic lights**, from Epic's authored signal data:
+**Semantic LiDAR**, after the hit-label resolver:
+
+```
+                        before                       after
+tags        {0: 230481, 14: 2019, 7: 84}   {20: 104782, 1: 74076, 2: 19095,
+                                            6: 9788, 3: 8376, 0: 7594,
+                                            14: 4596, 5: 3281}
+Unlabeled            99.1%                        3.3%
+distinct labels          3                            8
+```
+
+**Traffic lights and stop signs**, from Epic's authored signal data:
 
 ```
 crosswalk lanes in the ZoneGraph  : 1,096 -> 5,480 polygon points
 lights harvested from the .uasset : 358
 matched onto our approach roads   : 353   (106 of 172 junctions)
 traffic.traffic_light actors      : 353   (was 0)
-OpenDRIVE landmarks               : 584   (was 0)
+unsignalised junctions            : 66    -> 229 stop signs
+traffic.stop actors               : 217   (was 0)
+OpenDRIVE landmarks               : 813   (was 0)
 group sizes                       : 3 x183, 4 x160, 6 x6, solo x4
 phase cycle observed              : R R G G -> R R Y Y -> R R R R -> G G R R
 vehicles sampled at a red light   : 47, of which 17 stationary
@@ -899,27 +914,19 @@ Everything here was measured on the running server, not inferred.
 
 ### What you should not trust yet
 
-- **Semantic LiDAR is unlabeled** (mostly tag 0), and this one is not a small
-  fix. The FastGeo tagger corrects the *camera*, which reads its label out of
-  custom primitive data on the GPU. Semantic LiDAR is a physics trace:
-  `RayCastSemanticLidar.cpp` reads `HitInfo.Component` and asks
-  `ATagger::GetTagOfTaggedComponent` for its `ComponentTags[0]`. FastGeo owns
-  its collision through its own `FBodyInstance`s and resolves them via
-  `IPhysicsBodyInstanceOwner` rather than through a `UPrimitiveComponent`, so
-  for city geometry there is no component to carry a tag. Fixing it properly
-  means resolving the hit's `Chaos::FConstPhysicsObjectHandle` back through
-  `UFastGeoContainer::ResolvePhysicsBodyInstanceOwner` to the FastGeo component
-  and reading the label out of its custom primitive data — a change inside
-  CARLA's sensor code, not something the tagger can reach. Use the camera for
-  segmentation until then. CARLA's own spawned actors (vehicles, walkers,
-  traffic lights) *are* tagged correctly by semantic LiDAR.
+- **Semantic LiDAR leaves 3.3 % unlabeled** — thin geometry and whatever the
+  tagger has not swept yet. It needs `carla.FastGeoTagger.Enable 1`, the same
+  flag the camera needs; without it, ray-cast labels fall back to Unlabeled.
 - **Sidewalks are synthesised.** The exported network has no sidewalk lanes, so
   pedestrian navigation runs on 2.5 m strips laid along the carriageway edges,
   pushed outward until they clear the road. They approximate the real sidewalk
   meshes; they are not a measurement of them. Some walkers will therefore walk
   where a City Sample pedestrian would not.
-- **Road signs are absent.** Stop, yield and speed-limit objects are not
-  emitted into the OpenDRIVE. Traffic lights and crosswalks are.
+- **Yield and speed-limit signs are absent**, because City Sample does not
+  author them: its traffic is Mass-driven off the ZoneGraph, and the only
+  intersection semantics Epic records are "has a traffic light" or not. Stop
+  signs ARE emitted, from exactly that distinction. There are no speed limits
+  to export either, so CARLA applies its default 30 km/h.
 - **`set_autopilot(True)` gets the vehicle destroyed.** On this network a
   vehicle on the traffic manager drives normally and is then removed by the
   server, reproducibly at the same point, with no collision and nothing logged.
@@ -974,6 +981,8 @@ that are CARLA's rather than ours are written up in
 | no traffic lights at all | 353 lights, 106 junctions, phased | `carla_traffic_lights.py` |
 | no crosswalks | 1,096, as 5,480 polygon points | `carla_traffic_lights.py` |
 | `world.get_actors()` blind to Epic's traffic and crowd | 250 dormant proxies (150 vehicles, 100 pedestrians), nearest first | `carla_mass_bridge.py` |
+| semantic LiDAR 99.1 % `Unlabeled` | 3.3 %, eight labels | `verify_sensors.py` |
+| no stop signs | 229 landmarks, 217 `traffic.stop` actors | `carla_traffic_lights.py` |
 | `get_random_location_from_navigation()` always `None` | 608 navmesh tiles, walkers walk | `carla_walkers.py` |
 | `ground_projection()` / `project_point()` returned `None` | real locations | `verify_sensors.py` |
 | the server asserted and died mid-run under streaming | no assertions | any of the above |

@@ -316,7 +316,7 @@ index 8a67ccd1a..aa8b14517 100644
  
    int PendingLevelsToLoad = 0;
 diff --git a/Unreal/CarlaUnreal/Plugins/Carla/Source/Carla/Game/Tagger.cpp b/Unreal/CarlaUnreal/Plugins/Carla/Source/Carla/Game/Tagger.cpp
-index ddfcdd80e..4e05c8f97 100644
+index ddfcdd80e..8a8b2f03d 100644
 --- a/Unreal/CarlaUnreal/Plugins/Carla/Source/Carla/Game/Tagger.cpp
 +++ b/Unreal/CarlaUnreal/Plugins/Carla/Source/Carla/Game/Tagger.cpp
 @@ -15,6 +15,10 @@
@@ -672,11 +672,90 @@ index ddfcdd80e..4e05c8f97 100644
  }
  
  crp::CityObjectLabel ATagger::GetTagOfTaggedComponent(const UPrimitiveComponent &Component)
+@@ -197,6 +495,40 @@ crp::CityObjectLabel ATagger::GetTagOfTaggedComponent(const UPrimitiveComponent
+   return static_cast<crp::CityObjectLabel>(Component.CustomDepthStencilValue);
+ }
+ 
++namespace
++{
++  ATagger::FHitLabelResolver GHitLabelResolver;
++}
++
++void ATagger::SetHitLabelResolver(ATagger::FHitLabelResolver Resolver)
++{
++  GHitLabelResolver = MoveTemp(Resolver);
++  UE_LOG(LogCarla, Log, TEXT("CarlaTagger: external hit-label resolver %s"),
++         GHitLabelResolver ? TEXT("installed") : TEXT("cleared"));
++}
++
++crp::CityObjectLabel ATagger::GetTagOfHit(const FHitResult &Hit)
++{
++  // A tagged UPrimitiveComponent answers directly and costs nothing.
++  if (Hit.Component.IsValid() && Hit.Component->ComponentTags.Num() > 0) {
++    return GetTagFromString(Hit.Component->ComponentTags[0].ToString());
++  }
++
++  // Nothing to read on the component - ask the project. This is the path that
++  // labels geometry owning its own physics bodies.
++  if (GHitLabelResolver) {
++    const crp::CityObjectLabel Label = GHitLabelResolver(Hit);
++    if (Label != crp::CityObjectLabel::None) {
++      return Label;
++    }
++  }
++
++  if (Hit.Component.IsValid()) {
++    return static_cast<crp::CityObjectLabel>(Hit.Component->CustomDepthStencilValue);
++  }
++  return crp::CityObjectLabel::None;
++}
++
+ void ATagger::GetTagsOfTaggedActor(const AActor &Actor, TSet<crp::CityObjectLabel> &Tags)
+ {
+   TArray<UPrimitiveComponent *> Components;
 diff --git a/Unreal/CarlaUnreal/Plugins/Carla/Source/Carla/Game/Tagger.h b/Unreal/CarlaUnreal/Plugins/Carla/Source/Carla/Game/Tagger.h
-index 051f325b3..08ddc4d78 100644
+index 051f325b3..bca1970c2 100644
 --- a/Unreal/CarlaUnreal/Plugins/Carla/Source/Carla/Game/Tagger.h
 +++ b/Unreal/CarlaUnreal/Plugins/Carla/Source/Carla/Game/Tagger.h
-@@ -72,6 +72,27 @@ public:
+@@ -19,6 +19,8 @@
+ 
+ namespace crp = carla::rpc;
+ 
++struct FHitResult;
++
+ /// Sets actors' custom depth stencil value for semantic segmentation according
+ /// to their meshes.
+ ///
+@@ -52,6 +54,28 @@ public:
+ 
+   /// Retrieve the tag of an already tagged component.
+   static crp::CityObjectLabel GetTagOfTaggedComponent(const UPrimitiveComponent &Component);
++
++  /// Label for a physics hit, for the ray-casting sensors.
++  ///
++  /// Prefer this over GetTagOfTaggedComponent(*Hit.Component) in a sensor. Not
++  /// every hit has a UPrimitiveComponent behind it: a project may stream its
++  /// geometry as something that owns its own FBodyInstances and resolves them
++  /// through IPhysicsBodyInstanceOwner, in which case Hit.Component is null or
++  /// carries no tag and the sensor reports Unlabeled for the entire world.
++  /// Epic's FastGeoStreaming, which the City Sample uses, is exactly that.
++  ///
++  /// Resolution order: the component's own tag, then the external resolver, then
++  /// the component's stencil value.
++  static crp::CityObjectLabel GetTagOfHit(const FHitResult &Hit);
++
++  /// Hook for a project that can label hits CARLA cannot reach on its own.
++  ///
++  /// Kept as a hook rather than a direct dependency so the plugin does not have
++  /// to link an experimental engine plugin to support one project's streaming
++  /// scheme. Called per hit, so it must be cheap - a lidar sweep is hundreds of
++  /// thousands of them. Pass nullptr to clear.
++  using FHitLabelResolver = TFunction<crp::CityObjectLabel(const FHitResult &)>;
++  static void SetHitLabelResolver(FHitLabelResolver Resolver);
+   
+   /// Retrieve the tags of an already tagged actor. CityObjectLabel::None is
+   /// not added to the array.
+@@ -72,6 +96,27 @@ public:
    /// Method that computes the label corresponding to a folder path
    static crp::CityObjectLabel GetLabelByFolderName(const FString &String);
  
@@ -704,7 +783,7 @@ index 051f325b3..08ddc4d78 100644
    /// Method that computes the label corresponding to an specific object
    /// using the folder path in which it is stored
    template <typename T>
-@@ -84,6 +105,15 @@ public:
+@@ -84,6 +129,15 @@ public:
        return crp::CityObjectLabel::None;
      }
      const FString Path = Object->GetPathName();
@@ -856,7 +935,7 @@ index 295c8c92e..3816157e3 100644
          FCollisionResponseParams::DefaultResponseParam
        );
 diff --git a/Unreal/CarlaUnreal/Plugins/Carla/Source/Carla/Sensor/RayCastSemanticLidar.cpp b/Unreal/CarlaUnreal/Plugins/Carla/Source/Carla/Sensor/RayCastSemanticLidar.cpp
-index a3a832a56..dbebbaf75 100644
+index a3a832a56..141d01c3a 100644
 --- a/Unreal/CarlaUnreal/Plugins/Carla/Source/Carla/Sensor/RayCastSemanticLidar.cpp
 +++ b/Unreal/CarlaUnreal/Plugins/Carla/Source/Carla/Sensor/RayCastSemanticLidar.cpp
 @@ -8,6 +8,7 @@
@@ -893,7 +972,24 @@ index a3a832a56..dbebbaf75 100644
        TraceParams.bTraceComplex = true;
        TraceParams.bReturnPhysicalMaterial = false;
  
-@@ -269,7 +282,7 @@ bool ARayCastSemanticLidar::ShootLaser(const float VerticalAngle, const float Ho
+@@ -229,8 +242,14 @@ void ARayCastSemanticLidar::ComputeRawDetection(const FHitResult& HitInfo, const
+     if (actor != nullptr && actor->IsA<ALandscape>()){
+       Detection.object_tag = static_cast<uint32_t>(ATagger::GetTagFromString("Terrain"));
+     }
+-    else if (HitInfo.Component.IsValid()) {
+-      Detection.object_tag = static_cast<uint32_t>(ATagger::GetTagOfTaggedComponent(*HitInfo.Component));
++    else {
++      // GetTagOfHit, not GetTagOfTaggedComponent(*HitInfo.Component): a hit
++      // does not always have a UPrimitiveComponent behind it. Geometry that
++      // owns its own FBodyInstances - Epic's FastGeoStreaming, which the City
++      // Sample streams its whole world through - leaves Component null or
++      // untagged, and every point came back Unlabeled. GetTagOfHit tries the
++      // component first, then the project's resolver, then the stencil.
++      Detection.object_tag = static_cast<uint32_t>(ATagger::GetTagOfHit(HitInfo));
+     }
+ 
+     if (actor != nullptr) {
+@@ -269,7 +288,7 @@ bool ARayCastSemanticLidar::ShootLaser(const float VerticalAngle, const float Ho
      HitInfo,
      LidarBodyLoc,
      EndTrace,

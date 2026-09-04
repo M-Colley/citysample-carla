@@ -71,6 +71,22 @@ MATCH_RADIUS_M = 6.0
 SIDE_RADIUS_M = 8.0
 
 SIGNAL_TYPE = "1000001"          # CARLA: SignalType::IsTrafficLight
+
+# A junction with no traffic light is a STOP-SIGN junction, and that is Epic's
+# own rule rather than a guess of ours. MassTraffic derives
+# FMassTrafficIntersectionDetail::bHasTrafficLights from whether a light was
+# found near the intersection
+# (MassTrafficIntersections.cpp:397 `bHasTrafficLights |=
+# (NearestTrafficLightDetailIndex != INDEX_NONE)`), and everything downstream
+# branches on it - MassTrafficIntersectionSpawnDataGenerator.cpp even labels the
+# other branch "4WAYSTOPSIGN". So the junctions that took no light here are the
+# ones Epic drives as stop-sign intersections, and emitting a stop sign on each
+# approach reproduces the behaviour rather than inventing it.
+#
+# CARLA already knows this type: ATrafficLightManager maps SignalType::StopSign
+# to a stop-sign actor with a UStopSignComponent trigger volume, so these become
+# real traffic.stop actors the client can query.
+STOP_SIGN_TYPE = "206"           # CARLA: SignalType::StopSign
 MOUNT_HEIGHT_M = 5.5
 
 
@@ -229,6 +245,42 @@ def phase_of(sides) -> dict:
         # Within 45 deg of the reference axis (or of its opposite) -> phase 0.
         out[i] = 0 if (d < math.radians(45) or d > math.radians(135)) else 1
     return out
+
+
+def emit_stop_signs(root: ET.Element, approaches, signalised_junctions):
+    """A stop sign on every approach to a junction that took no traffic light.
+
+    Static signs, so no <controller> and no dynamic phase: unlike a light, each
+    one stands alone. They still get a <validity> over the approach's own lanes
+    so a vehicle in the opposite carriageway is not stopped by the sign facing
+    the other way.
+    """
+    n = 0
+    junctions = set()
+    for host in approaches:
+        if host.junction in signalised_junctions:
+            continue
+        junctions.add(host.junction)
+        sid = f"stop{host.junction}_{host.road_id}"
+        t = host.lane_offset - host.n_lanes * host.lane_width - POLE_CLEAR_M
+        s_pos = max(0.0, host.length - STOPLINE_SETBACK_M)
+
+        signals = host.road.find("signals")
+        if signals is None:
+            signals = ET.SubElement(host.road, "signals")
+        sig = ET.SubElement(
+            signals, "signal",
+            s=f"{s_pos:.6f}", t=f"{t:.6f}", id=sid,
+            name=f"StopSign_{host.junction}_{host.road_id}",
+            dynamic="no", orientation="-",
+            zOffset=f"{MOUNT_HEIGHT_M:.6f}", country="OpenDRIVE",
+            type=STOP_SIGN_TYPE, subtype="-1", value="-1.0",
+            unit="", height="0.8", width="0.8", text="",
+            hOffset="0.0", pitch="0.0", roll="0.0")
+        ET.SubElement(sig, "validity",
+                      fromLane=f"-{host.n_lanes}", toLane="-1")
+        n += 1
+    return n, len(junctions)
 
 
 def emit(root: ET.Element, by_junction, verbose=False):
@@ -424,6 +476,11 @@ def main() -> int:
     ap.add_argument("xodr", nargs="?")
     ap.add_argument("lights", nargs="?")
     ap.add_argument("-o", "--output", default=None)
+    ap.add_argument("--no-stop-signs", action="store_true",
+                    help="do not emit stop signs at the junctions that have no "
+                         "traffic light. They are Epic's stop-sign "
+                         "intersections (MassTraffic's bHasTrafficLights is "
+                         "false for exactly these), so they are on by default")
     ap.add_argument("--selftest", action="store_true")
     args = ap.parse_args()
 
@@ -444,6 +501,8 @@ def main() -> int:
     approaches = collect_approaches(root)
     by_junction, matched = build_sides(approaches, lights)
     n_sig, n_ref, n_ctl = emit(root, by_junction)
+    n_stop, n_stop_junc = (0, 0) if args.no_stop_signs else emit_stop_signs(
+        root, approaches, set(by_junction))
 
     out = args.output or args.xodr.rsplit(".", 1)[0] + "-signals.xodr"
     indent(root)
@@ -457,6 +516,8 @@ def main() -> int:
     print(f"  lane references       : {n_ref:,}")
     print(f"  controllers (phases)  : {n_ctl:,}")
     print(f"  junctions signalised  : {len(by_junction):,} / {n_junc:,}")
+    print(f"  stop signs emitted    : {n_stop:,} "
+          f"across {n_stop_junc:,} unsignalised junctions")
     if not n_sig:
         print("  NO SIGNALS EMITTED - check the lights file matches this map",
               file=sys.stderr)
