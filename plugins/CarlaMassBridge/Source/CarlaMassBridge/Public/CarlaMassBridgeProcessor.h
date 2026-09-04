@@ -10,7 +10,8 @@
 
 #include "CarlaMassBridgeProcessor.generated.h"
 
-/// Sweeps MassTraffic vehicle entities once per frame and mirrors them into
+/// Sweeps Epic's Mass entities once per frame - MassTraffic vehicles and
+/// MassCrowd pedestrians - and mirrors them into
 /// CARLA's actor registry through UCarlaMassBridgeSubsystem.
 ///
 /// Runs on the game thread in PostPhysics: the registry is not thread-safe and
@@ -32,4 +33,9 @@ private:
     /// Constructor-initialised, as every MassTraffic processor does
     /// (`: EntityQuery(*this)`). There is no FMassEntityQuery::Initialize().
     FMassEntityQuery VehicleQuery;
+
+    /// Epic's pedestrians (FMassCrowdTag). A separate query rather than a
+    /// widened one: the two populations have different tags, different budgets,
+    /// and become different CARLA actor types.
+    FMassEntityQuery CrowdQuery;
 };

@@ -56,6 +56,9 @@ public class CarlaMassBridge : ModuleRules
         {
             "MassMovement",
             "MassSimulation",
+            // Epic's pedestrians. FMassCrowdTag lives in MassCrowdFragments.h,
+            // which is the MassCrowd plugin, not MassAI.
+            "MassCrowd",
         });
     }
 }

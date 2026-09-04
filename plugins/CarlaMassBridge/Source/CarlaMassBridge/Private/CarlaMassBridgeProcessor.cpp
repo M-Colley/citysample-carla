@@ -11,6 +11,7 @@
 #include "MassEntityManager.h"
 #include "MassMovementFragments.h"
 #include "MassTrafficFragments.h"
+#include "MassCrowdFragments.h"
 #include "Mass/EntityFragments.h"
 
 #include "Engine/World.h"
@@ -42,12 +43,21 @@ namespace
   static TAutoConsoleVariable<int32> CVarCarlaMassBridgeMax(
       TEXT("carla.MassBridge.MaxProxies"),
       150,
-      TEXT("Maximum number of Mass entities mirrored per frame."),
+      TEXT("Maximum number of Mass VEHICLES mirrored per frame."),
+      ECVF_Default);
+
+  // Pedestrians get their own budget rather than sharing one. City Sample runs
+  // far more crowd entities than vehicles near the camera, so a shared cap
+  // filled up with pedestrians and the traffic vanished from get_actors().
+  static TAutoConsoleVariable<int32> CVarCarlaMassBridgeMaxWalkers(
+      TEXT("carla.MassBridge.MaxWalkers"),
+      100,
+      TEXT("Maximum number of MassCrowd pedestrians mirrored per frame."),
       ECVF_Default);
 }
 
 UCarlaMassBridgeProcessor::UCarlaMassBridgeProcessor()
-    : VehicleQuery(*this)
+    : VehicleQuery(*this), CrowdQuery(*this)
 {
     ExecutionFlags = static_cast<int32>(EProcessorExecutionFlags::All);
     ProcessingPhase = EMassProcessingPhase::PostPhysics;
@@ -61,6 +71,14 @@ void UCarlaMassBridgeProcessor::ConfigureQueries(
     VehicleQuery.AddTagRequirement<FMassTrafficVehicleTag>(EMassFragmentPresence::All);
     VehicleQuery.AddRequirement<FTransformFragment>(EMassFragmentAccess::ReadOnly);
     VehicleQuery.AddRequirement<FMassVelocityFragment>(
+        EMassFragmentAccess::ReadOnly, EMassFragmentPresence::Optional);
+
+    // Epic's pedestrians. Same shape, different tag: MassCrowd marks its
+    // entities with FMassCrowdTag, and they carry the same transform and
+    // velocity fragments the vehicles do.
+    CrowdQuery.AddTagRequirement<FMassCrowdTag>(EMassFragmentPresence::All);
+    CrowdQuery.AddRequirement<FTransformFragment>(EMassFragmentAccess::ReadOnly);
+    CrowdQuery.AddRequirement<FMassVelocityFragment>(
         EMassFragmentAccess::ReadOnly, EMassFragmentPresence::Optional);
 }
 
@@ -100,30 +118,46 @@ void UCarlaMassBridgeProcessor::Execute(FMassEntityManager &EntityManager,
 
     Bridge->BeginFrame();
 
-    int32 Emitted = 0;
-    VehicleQuery.ForEachEntityChunk(Context,
-        [&Bridge, &Emitted, MaxProxies](FMassExecutionContext &Ctx)
-        {
-            const int32 Num = Ctx.GetNumEntities();
-            const TConstArrayView<FTransformFragment> Transforms =
-                Ctx.GetFragmentView<FTransformFragment>();
-            const TConstArrayView<FMassVelocityFragment> Velocities =
-                Ctx.GetFragmentView<FMassVelocityFragment>();
-            const bool bHasVelocity = Velocities.Num() == Num;
-
-            for (int32 i = 0; i < Num; ++i)
+    // One lambda for both populations - they differ only in the tag their query
+    // matched and the kind of proxy they become.
+    const auto Sweep = [&Bridge](FMassEntityQuery &Query,
+                                 FMassExecutionContext &Ctx0,
+                                 int32 Budget,
+                                 UCarlaMassBridgeSubsystem::EProxyKind Kind)
+    {
+        int32 Emitted = 0;
+        Query.ForEachEntityChunk(Ctx0,
+            [&Bridge, &Emitted, Budget, Kind](FMassExecutionContext &Ctx)
             {
-                if (Emitted >= MaxProxies)
+                const int32 Num = Ctx.GetNumEntities();
+                const TConstArrayView<FTransformFragment> Transforms =
+                    Ctx.GetFragmentView<FTransformFragment>();
+                const TConstArrayView<FMassVelocityFragment> Velocities =
+                    Ctx.GetFragmentView<FMassVelocityFragment>();
+                const bool bHasVelocity = Velocities.Num() == Num;
+
+                for (int32 i = 0; i < Num; ++i)
                 {
-                    return;
+                    if (Emitted >= Budget)
+                    {
+                        return;
+                    }
+                    Bridge->SyncEntity(
+                        Ctx.GetEntity(i),
+                        Transforms[i].GetTransform(),
+                        bHasVelocity ? Velocities[i].Value : FVector::ZeroVector,
+                        Kind);
+                    ++Emitted;
                 }
-                Bridge->SyncEntity(
-                    Ctx.GetEntity(i),
-                    Transforms[i].GetTransform(),
-                    bHasVelocity ? Velocities[i].Value : FVector::ZeroVector);
-                ++Emitted;
-            }
-        });
+            });
+        return Emitted;
+    };
+
+    Sweep(VehicleQuery, Context, MaxProxies,
+          UCarlaMassBridgeSubsystem::EProxyKind::Vehicle);
+    Sweep(CrowdQuery, Context,
+          FMath::Max(0, CVarCarlaMassBridgeMaxWalkers.GetValueOnGameThread()),
+          UCarlaMassBridgeSubsystem::EProxyKind::Walker);
 
     Bridge->EndFrame();
 }

@@ -72,15 +72,24 @@ if (-not (Test-Path $LogDir)) { New-Item -ItemType Directory -Path $LogDir -Forc
 # they are not junctions. So editing CARLA's own tree and rebuilding produces a
 # successful build of the OLD code, with no warning and nothing in the log to
 # say why the change had no effect. Costly to debug, trivial to detect.
-$carlaSrc = Join-Path $CarlaRepo "Unreal\CarlaUnreal\Plugins\Carla\Source"
-$carlaDst = Join-Path $CitySample "Plugins\Carla\Source"
-if ((Test-Path $carlaSrc) -and (Test-Path $carlaDst)) {
-    $newest = { param($p) (Get-ChildItem $p -Recurse -File -Include *.cpp,*.h -ErrorAction SilentlyContinue |
-                           Measure-Object LastWriteTimeUtc -Maximum).Maximum }
-    $srcTime = & $newest $carlaSrc
-    $dstTime = & $newest $carlaDst
+$newest = { param($p) (Get-ChildItem $p -Recurse -File -Include *.cpp,*.h,*.cs -ErrorAction SilentlyContinue |
+                       Measure-Object LastWriteTimeUtc -Maximum).Maximum }
+# BOTH plugin sources, because both are copies and both have caught people out.
+# CarlaMassBridge is the one edited most often, and a stale copy there fails in
+# the most confusing way available: the build succeeds, the server starts, and
+# the feature you just wrote simply is not there.
+$pairs = @(
+    @{ Name = "Carla";           Src = (Join-Path $CarlaRepo "Unreal\CarlaUnreal\Plugins\Carla\Source");
+                                 Dst = (Join-Path $CitySample "Plugins\Carla\Source") },
+    @{ Name = "CarlaMassBridge"; Src = (Join-Path $PSScriptRoot "..\plugins\CarlaMassBridge\Source");
+                                 Dst = (Join-Path $CitySample "Plugins\CarlaMassBridge\Source") }
+)
+foreach ($pair in $pairs) {
+    if (-not ((Test-Path $pair.Src) -and (Test-Path $pair.Dst))) { continue }
+    $srcTime = & $newest $pair.Src
+    $dstTime = & $newest $pair.Dst
     if ($srcTime -and $dstTime -and $srcTime -gt $dstTime.AddSeconds(2)) {
-        Write-Warning ("the CARLA plugin source in $CarlaRepo is newer than the " +
+        Write-Warning ("$($pair.Name): the source in $($pair.Src) is newer than the " +
                        "project's copy ($($srcTime.ToLocalTime()) vs $($dstTime.ToLocalTime())).`n" +
                        "         Your edits will NOT be built. Re-run:  " +
                        "powershell -File tools\Integrate-CarlaIntoCitySample.ps1")

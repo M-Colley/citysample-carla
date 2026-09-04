@@ -110,7 +110,7 @@ class RouteDriver:
     every single time, with no collision recorded, its state going straight from
     Active to PendingKill. Manual control over the same stretch survives
     indefinitely, so it is the traffic manager rather than streaming, dormancy
-    or geometry - see README section 9.
+    or geometry - see README section 10.
 
     Following waypoints instead sidesteps that, and demonstrates the thing this
     whole project exists for: the route comes from the exported road network, so
@@ -223,7 +223,7 @@ def main() -> int:
         # CARLA's game mode spawns its OWN directional light on top of the one
         # City Sample already has, and two suns blow every lit surface to white.
         # Putting CARLA's below the horizon leaves City Sample's lighting alone.
-        # See README section 9 and ISSUES-TO-FILE.md issue 5.
+        # See README section 10 and ISSUES-TO-FILE.md issue 5.
         if args.fix_sun:
             w = world.get_weather()
             w.sun_altitude_angle = -90.0
@@ -440,10 +440,10 @@ def main() -> int:
 
             d = ImageDraw.Draw(sheet)
             y = PANEL_H * 2 + 9
-            # Say WHOSE count this is. It is what the CARLA API can see, not
-            # what is on screen: Epic's Mass crowd is rendered but not bridged
-            # (the bridge proxies vehicles only), so pedestrians can be walking
-            # past a reading of zero.
+            # Say WHOSE count this is: what the CARLA API can see, which is
+            # not automatically what is on screen. With the Mass bridge on,
+            # Epic's traffic AND crowd are both mirrored in, so these track the
+            # city; with it off they count only what this script spawned.
             d.text((10, y),
                    f"Epic City Sample  served by CARLA 0.10   "
                    f"{kmh:5.1f} km/h   "

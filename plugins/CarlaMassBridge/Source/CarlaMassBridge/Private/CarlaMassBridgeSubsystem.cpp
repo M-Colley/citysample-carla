@@ -26,13 +26,21 @@ namespace
   // a 2.4 cm car - which is exactly what the first run reported.
   const FVector kDefaultVehicleExtent(240.0f, 100.0f, 80.0f);
 
-  FActorDescription MakeMassVehicleDescription()
+  // Half-extents of an adult, also in centimetres: 0.6 m across, 1.8 m tall.
+  const FVector kDefaultWalkerExtent(30.0f, 30.0f, 90.0f);
+
+  FActorDescription MakeMassProxyDescription(
+      UCarlaMassBridgeSubsystem::EProxyKind Kind)
   {
     FActorDescription Description;
-    // "vehicle." prefix so the client factory builds a carla.Vehicle. That is
-    // also exactly why the Traffic Manager would adopt these - see the warning
-    // in the header.
-    Description.Id = TEXT("vehicle.mass.citysample");
+    // The prefix is load-bearing on the CLIENT: ActorFactory dispatches on the
+    // type id, so "vehicle." builds a carla.Vehicle and "walker." a
+    // carla.Walker. It is also exactly why the Traffic Manager adopts the
+    // vehicles - see the warning in the header. Walkers are not adopted by the
+    // TM, but they are still read-only here: Epic's crowd owns their motion.
+    Description.Id = (Kind == UCarlaMassBridgeSubsystem::EProxyKind::Walker)
+                         ? TEXT("walker.mass.citysample")
+                         : TEXT("vehicle.mass.citysample");
     Description.UId = 0u;
     return Description;
   }
@@ -60,7 +68,8 @@ void UCarlaMassBridgeSubsystem::BeginFrame()
 
 void UCarlaMassBridgeSubsystem::SyncEntity(FMassEntityHandle Entity,
                                            const FTransform &Transform,
-                                           const FVector &Velocity)
+                                           const FVector &Velocity,
+                                           EProxyKind Kind)
 {
     UCarlaEpisode *Episode = GetEpisode();
     if (Episode == nullptr)
@@ -85,14 +94,21 @@ void UCarlaMassBridgeSubsystem::SyncEntity(FMassEntityHandle Entity,
 
     if (Existing == nullptr)
     {
-        TSet<crp::CityObjectLabel> Tags;
-        Tags.Add(crp::CityObjectLabel::Car);
+        const bool bWalker = (Kind == EProxyKind::Walker);
 
-        const FBoundingBox Box{FVector::ZeroVector, kDefaultVehicleExtent, FRotator::ZeroRotator};
+        TSet<crp::CityObjectLabel> Tags;
+        Tags.Add(bWalker ? crp::CityObjectLabel::Pedestrians
+                         : crp::CityObjectLabel::Car);
+
+        const FBoundingBox Box{
+            FVector::ZeroVector,
+            bWalker ? kDefaultWalkerExtent : kDefaultVehicleExtent,
+            FRotator::ZeroRotator};
 
         CarlaActor = Episode->GetActorRegistry().RegisterDormant(
-            MakeMassVehicleDescription(),
-            FCarlaActor::ActorType::Vehicle,
+            MakeMassProxyDescription(Kind),
+            bWalker ? FCarlaActor::ActorType::Walker
+                    : FCarlaActor::ActorType::Vehicle,
             Tags,
             Box,
             GetWorld());

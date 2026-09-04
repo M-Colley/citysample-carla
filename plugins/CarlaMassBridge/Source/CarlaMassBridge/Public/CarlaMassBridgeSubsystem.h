@@ -72,9 +72,20 @@ public:
     /// Called by the processor before it sweeps entities.
     void BeginFrame();
 
+    /// What kind of CARLA actor an entity is mirrored as. City Sample runs two
+    /// independent Mass populations - MassTraffic vehicles and the MassCrowd
+    /// pedestrians - and the CARLA client builds a different Python class from
+    /// each type-id prefix, so the two cannot share one description.
+    enum class EProxyKind : uint8
+    {
+        Vehicle,
+        Walker,
+    };
+
     /// Register (or refresh) the proxy for one Mass entity.
     void SyncEntity(FMassEntityHandle Entity, const FTransform &Transform,
-                    const FVector &Velocity);
+                    const FVector &Velocity,
+                    EProxyKind Kind = EProxyKind::Vehicle);
 
     /// Deregister proxies whose entity was not seen this frame.
     void EndFrame();

@@ -6,7 +6,7 @@
 > | **1** Collision channels + segmentation CVar + Tagger | **done** | lidar 0 -> 232,584 points; radar 0 -> 1,980; segmentation out-of-range 8.7-100% -> 0.00% |
 > | **2** Deploy the .xodr | **done** | `Saved/OpenDrive/Small_City_LVL.xodr` |
 > | **3** Tagger table refinement | **done** | 40 rules; only 6 unmatched paths, all `/Engine/` meshes |
-> | **4** Mass entity bridge, Phase 1 | **done** | 150 dormant proxies in `get_actors()`, ids `0x8000....`, 106/150 tracking motion |
+> | **4** Mass entity bridge | **done** | 248 dormant proxies in `get_actors()` - 148 MassTraffic vehicles and 100 MassCrowd pedestrians, ids `0x8000....`, 142 tracking motion |
 > | **5** FastGeo tagging (beyond the plan) | **done** | every loaded FastGeo primitive tagged, 0 unmatched; unlabeled pixels 98.8% -> 0.5% |
 >
 > **One finding superseded the plan, and was then fixed.** Stage 3 assumed the

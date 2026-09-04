@@ -35,7 +35,9 @@ try:
 except ImportError:
     sys.exit("carla is not importable - build the Python API first")
 
-PREFIX = "vehicle.mass"
+# Both populations: MassTraffic vehicles are mirrored as
+# vehicle.mass.citysample, MassCrowd pedestrians as walker.mass.citysample.
+PREFIX = ("vehicle.mass", "walker.mass")
 
 
 def main() -> int:
@@ -72,8 +74,13 @@ def main() -> int:
 
     print(f"\n=== registry ===")
     print(f"  actors total   : {len(actors):,}")
-    print(f"  Mass proxies   : {len(proxies):,}")
+    n_veh = sum(1 for a in proxies if a.type_id.startswith("vehicle.mass."))
+    n_ped = sum(1 for a in proxies if a.type_id.startswith("walker.mass."))
+    print(f"  Mass proxies   : {len(proxies):,}  ({n_veh} vehicles, {n_ped} pedestrians)")
     print(f"  types: {dict(collections.Counter(a.type_id for a in actors).most_common(5))}")
+    if n_ped == 0:
+        print("  NOTE: no pedestrian proxies. Epic's crowd is bridged separately -")
+        print("        check carla.MassBridge.MaxWalkers is not 0.")
 
     if not proxies:
         print("\nNO PROXIES. In order:")
@@ -86,10 +93,15 @@ def main() -> int:
     print(f"  id range       : 0x{min(ids):X} .. 0x{max(ids):X}"
           f"  ({'dormant range, good' if min(ids) >= 0x80000000 else 'NOT in the dormant range'})")
 
-    boxes = [p.bounding_box.extent for p in proxies]
-    ex = sorted(2 * b.x for b in boxes)
-    print(f"  length m       : min {ex[0]:.2f} median {ex[len(ex)//2]:.2f} max {ex[-1]:.2f}"
-          f"  ({'plausible' if 1.0 < ex[len(ex)//2] < 20.0 else 'IMPLAUSIBLE - check units'})")
+    for label, pref, lo, hi in (("vehicle", "vehicle.mass.", 1.0, 20.0),
+                                ("walker ", "walker.mass.", 0.2, 2.0)):
+        ex = sorted(2 * p.bounding_box.extent.x
+                    for p in proxies if p.type_id.startswith(pref))
+        if not ex:
+            continue
+        med = ex[len(ex) // 2]
+        print(f"  {label} size m : min {ex[0]:.2f} median {med:.2f} max {ex[-1]:.2f}"
+              f"  ({'plausible' if lo < med < hi else 'IMPLAUSIBLE - check units'})")
 
     print(f"\n=== motion over {args.seconds:.0f}s ===")
     first = {p.id: p.get_transform().location for p in proxies}

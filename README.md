@@ -26,20 +26,20 @@ Background: [carla#9852](https://github.com/carla-simulator/carla/issues/9852).
 > ### ⚠ Read this before collecting any data
 >
 > **Working** — cameras, depth, GNSS, IMU, collision sensors, vehicle control,
-> the traffic manager, **LiDAR, semantic LiDAR, HSS LiDAR, radar,
-> `ground_projection`, `cast_ray`**, **353 traffic lights** across 106
-> junctions, **1,096 crosswalks**, **camera semantic segmentation** (0.5 %
-> unlabeled) and **pedestrian navigation**.
+> **LiDAR, semantic LiDAR, HSS LiDAR, radar, `ground_projection`, `cast_ray`**,
+> **353 traffic lights** across 106 junctions, **1,096 crosswalks**, **camera
+> semantic segmentation** (0.5 % unlabeled), **pedestrian navigation**, and
+> **Epic's own traffic and crowd** mirrored into `world.get_actors()`.
 >
 > Three of those are **opt-in**, because each one changes what the server does:
 >
 > | flag | what it turns on | step |
 > |---|---|---|
 > | `-ExecCmds "carla.FastGeoTagger.Enable 1"` | camera semantic labels for the city geometry | §3.10 |
-> | `-ExecCmds "carla.MassBridge.Enable 1"` | Epic's traffic visible to `world.get_actors()` | §3.9 |
+> | `-ExecCmds "carla.MassBridge.Enable 1"` | Epic's traffic *and crowd* visible to `world.get_actors()` | §3.9 |
 > | a built navmesh in `Content\Map\Nav\` | walkers and `get_random_location_from_navigation()` | §3.11 |
 >
-> **Known gaps, measured on the running server (§9):**
+> **Known gaps, measured on the running server (§10):**
 >
 > - **Semantic LiDAR is still unlabeled.** The FastGeo tagger fixes the
 >   *camera*, which reads labels from custom primitive data. Semantic LiDAR
@@ -279,7 +279,7 @@ copy SmallCity-signals.xodr "<CitySample>\Saved\OpenDrive\Small_City_LVL.xodr"
 Restart the server, then check it:
 
 ```bash
-python tools/carla_traffic_lights.py --traffic 60 --watch 20
+python tools/carla_traffic_lights.py --traffic 60 --watch 30
 ```
 
 Both converters have `--selftest` and need no editor and no rebuild.
@@ -451,7 +451,7 @@ with a coarse `Static` if a view is dominated by them.
 Note that this only fixes the **camera**. Semantic *LiDAR* tags come from the
 physics hit's component, a different code path that also cannot see FastGeo
 primitives — so semantic LiDAR still returns mostly tag 0. See
-[Known limitations](#9-known-limitations).
+[Known limitations](#10-known-limitations).
 
 ---
 
@@ -840,16 +840,63 @@ distance in 15 s   : median 21.0 m  (= the 1.4 m/s max speed set)
 ---
 
 
-## 9. Known limitations
+## 9. Using this with Carlamayo (or any 0.9.x client)
+
+The reason this project exists, from the Carlamayo side, was that the City
+Sample had no OpenDRIVE: `world.get_map()` raised `failed to generate map`,
+`get_spawn_points()` was empty, and the Traffic Manager could not run. That is
+fixed — the `MAP_HAS_OPENDRIVE = False` workaround in
+`0001-carlamayo-opendrive-optional.patch` is no longer needed for this map.
+
+What is ready:
+
+| Carlamayo needs | Status |
+|---|---|
+| `world.get_map()` | 2,945 road segments |
+| `get_spawn_points()` | 2,945 |
+| `NPC_WALKER_COUNT` (needs a navmesh) | 608 tiles, walkers spawn and walk |
+| Camera / depth / LiDAR / radar | all working |
+| Traffic lights for intersection behaviour | 353, phased, cycling |
+
+Two things still stand between this and a Carlamayo run:
+
+1. **Client version.** Carlamayo pins `carla==0.9.16` and this server is
+   **0.10.0**. The RPC protocol is not compatible across that gap, so the
+   0.9.16 wheel cannot talk to this server. You need the 0.10.0 client built
+   from your own tree (`Build/PythonAPI/dist/carla-0.10.0-*.whl`) and whatever
+   API changes that implies for Carlamayo. This is the real gate, and it has
+   nothing to do with the City Sample.
+2. **`NPC_VEHICLE_COUNT = 50` will decay.** Autopilot destroys vehicles on this
+   map (issue 9). Set it to `0` and use Epic's traffic instead — with
+   `carla.MassBridge.Enable 1` the city's own vehicles and pedestrians are
+   already in `world.get_actors()`, which is closer to what you want anyway:
+   hundreds of agents, driven by Epic's Mass simulation rather than by CARLA's
+   Traffic Manager.
+
+Everything else Carlamayo asks of a map is in place.
+
+---
+
+## 10. Known limitations
 
 Everything here was measured on the running server, not inferred.
 
 ### What you should not trust yet
 
-- **Semantic LiDAR is unlabeled** (mostly tag 0). The FastGeo tagger fixes the
-  *camera*, which reads its label out of custom primitive data. Semantic LiDAR
-  derives the tag from the physics hit's component, a separate code path that
-  also cannot see FastGeo primitives. Use the camera for segmentation.
+- **Semantic LiDAR is unlabeled** (mostly tag 0), and this one is not a small
+  fix. The FastGeo tagger corrects the *camera*, which reads its label out of
+  custom primitive data on the GPU. Semantic LiDAR is a physics trace:
+  `RayCastSemanticLidar.cpp` reads `HitInfo.Component` and asks
+  `ATagger::GetTagOfTaggedComponent` for its `ComponentTags[0]`. FastGeo owns
+  its collision through its own `FBodyInstance`s and resolves them via
+  `IPhysicsBodyInstanceOwner` rather than through a `UPrimitiveComponent`, so
+  for city geometry there is no component to carry a tag. Fixing it properly
+  means resolving the hit's `Chaos::FConstPhysicsObjectHandle` back through
+  `UFastGeoContainer::ResolvePhysicsBodyInstanceOwner` to the FastGeo component
+  and reading the label out of its custom primitive data — a change inside
+  CARLA's sensor code, not something the tagger can reach. Use the camera for
+  segmentation until then. CARLA's own spawned actors (vehicles, walkers,
+  traffic lights) *are* tagged correctly by semantic LiDAR.
 - **Sidewalks are synthesised.** The exported network has no sidewalk lanes, so
   pedestrian navigation runs on 2.5 m strips laid along the carriageway edges,
   pushed outward until they clear the road. They approximate the real sidewalk
@@ -910,7 +957,7 @@ that are CARLA's rather than ours are written up in
 | 98.8 % of the semantic frame `Unlabeled` | 0.5 % | `segmentation_census.py` |
 | no traffic lights at all | 353 lights, 106 junctions, phased | `carla_traffic_lights.py` |
 | no crosswalks | 1,096, as 5,480 polygon points | `carla_traffic_lights.py` |
-| `world.get_actors()` blind to Epic's traffic | 150 dormant proxies | `carla_mass_bridge.py` |
+| `world.get_actors()` blind to Epic's traffic and crowd | 248 dormant proxies (148 vehicles, 100 pedestrians) | `carla_mass_bridge.py` |
 | `get_random_location_from_navigation()` always `None` | 608 navmesh tiles, walkers walk | `carla_walkers.py` |
 | `ground_projection()` / `project_point()` returned `None` | real locations | `verify_sensors.py` |
 | the server asserted and died mid-run under streaming | no assertions | any of the above |

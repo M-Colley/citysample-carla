@@ -37,7 +37,10 @@ def main() -> int:
     ap.add_argument("--traffic", type=int, default=0,
                     help="spawn N cars and check they stop at red")
     ap.add_argument("--watch", type=float, default=0.0,
-                    help="seconds to watch one group cycle")
+                    help="seconds to watch one group cycle. A full cycle here "
+                         "is green 10s + yellow 3s + all-red 2s per arm, so "
+                         "give it 25s or more - a shorter window can sit "
+                         "inside one phase and look static when it is not")
     args = ap.parse_args()
 
     client = carla.Client(args.host, args.port)
@@ -188,8 +191,16 @@ def main() -> int:
                 seen.add(snap)
                 print(f"  {time.strftime('%H:%M:%S')}  {' '.join(snap)}")
             time.sleep(0.5)
-        print(f"  {len(seen)} distinct phase patterns observed "
-              f"({'cycling' if len(seen) > 1 else 'STATIC - not cycling'})")
+        if len(seen) > 1:
+            print(f"  {len(seen)} distinct phase patterns observed (cycling)")
+        elif args.watch < 25.0:
+            # Not a failure: one arm holds green for 10s, and the whole cycle
+            # runs about 30s, so a short window legitimately sees one pattern.
+            print(f"  1 pattern in {args.watch:.0f}s - INCONCLUSIVE, not a "
+                  f"failure. Re-run with --watch 30 to see a whole cycle.")
+        else:
+            print(f"  1 pattern in {args.watch:.0f}s - STATIC, the lights are "
+                  f"not cycling")
     return 0
 
 
