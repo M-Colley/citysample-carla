@@ -69,6 +69,14 @@ public:
     virtual bool IsTickable() const override { return false; }
     //~ End FTickableGameObject
 
+    /// Where to measure "near" from, in world space.
+    ///
+    /// The CARLA spectator, which the server moves to follow whatever the
+    /// client is looking through, falling back to the world origin. This is
+    /// what decides WHICH Mass entities get mirrored when there are more of
+    /// them than the budget allows.
+    FVector GetObserverLocation() const;
+
     /// Called by the processor before it sweeps entities.
     void BeginFrame();
 

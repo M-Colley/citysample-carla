@@ -12,6 +12,7 @@
 #include "MassMovementFragments.h"
 #include "MassTrafficFragments.h"
 #include "MassCrowdFragments.h"
+
 #include "Mass/EntityFragments.h"
 
 #include "Engine/World.h"
@@ -118,16 +119,37 @@ void UCarlaMassBridgeProcessor::Execute(FMassEntityManager &EntityManager,
 
     Bridge->BeginFrame();
 
-    // One lambda for both populations - they differ only in the tag their query
-    // matched and the kind of proxy they become.
-    const auto Sweep = [&Bridge](FMassEntityQuery &Query,
-                                 FMassExecutionContext &Ctx0,
-                                 int32 Budget,
-                                 UCarlaMassBridgeSubsystem::EProxyKind Kind)
+    // Mirror the entities NEAREST the observer, not the first N the query
+    // happens to yield.
+    //
+    // Chunk order is archetype order, which has nothing to do with geography,
+    // so a first-N cap scattered its proxies across the whole city: a camera
+    // could sit in dense traffic and see one bridged vehicle within 80 m while
+    // the budget was spent on entities kilometres away. Collecting candidates
+    // and taking the closest costs one pass and a partial sort over a few
+    // thousand entries, which is nothing next to the registry work it feeds.
+    const FVector Origin = Bridge->GetObserverLocation();
+
+    struct FCandidate
     {
-        int32 Emitted = 0;
+        FMassEntityHandle Entity;
+        FTransform Transform;
+        FVector Velocity;
+        double DistSq;
+    };
+
+    const auto Sweep = [&Bridge, &Origin](FMassEntityQuery &Query,
+                                          FMassExecutionContext &Ctx0,
+                                          int32 Budget,
+                                          UCarlaMassBridgeSubsystem::EProxyKind Kind)
+    {
+        if (Budget <= 0)
+        {
+            return 0;
+        }
+        TArray<FCandidate> Candidates;
         Query.ForEachEntityChunk(Ctx0,
-            [&Bridge, &Emitted, Budget, Kind](FMassExecutionContext &Ctx)
+            [&Candidates, &Origin](FMassExecutionContext &Ctx)
             {
                 const int32 Num = Ctx.GetNumEntities();
                 const TConstArrayView<FTransformFragment> Transforms =
@@ -136,21 +158,31 @@ void UCarlaMassBridgeProcessor::Execute(FMassEntityManager &EntityManager,
                     Ctx.GetFragmentView<FMassVelocityFragment>();
                 const bool bHasVelocity = Velocities.Num() == Num;
 
+                Candidates.Reserve(Candidates.Num() + Num);
                 for (int32 i = 0; i < Num; ++i)
                 {
-                    if (Emitted >= Budget)
-                    {
-                        return;
-                    }
-                    Bridge->SyncEntity(
+                    const FTransform &T = Transforms[i].GetTransform();
+                    Candidates.Add(FCandidate{
                         Ctx.GetEntity(i),
-                        Transforms[i].GetTransform(),
+                        T,
                         bHasVelocity ? Velocities[i].Value : FVector::ZeroVector,
-                        Kind);
-                    ++Emitted;
+                        FVector::DistSquared(T.GetLocation(), Origin)});
                 }
             });
-        return Emitted;
+
+        if (Candidates.Num() > Budget)
+        {
+            Candidates.Sort([](const FCandidate &A, const FCandidate &B)
+                {
+                    return A.DistSq < B.DistSq;
+                });
+            Candidates.SetNum(Budget, EAllowShrinking::No);
+        }
+        for (const FCandidate &C : Candidates)
+        {
+            Bridge->SyncEntity(C.Entity, C.Transform, C.Velocity, Kind);
+        }
+        return Candidates.Num();
     };
 
     Sweep(VehicleQuery, Context, MaxProxies,

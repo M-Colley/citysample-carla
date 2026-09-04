@@ -51,7 +51,10 @@ Background: [carla#9852](https://github.com/carla-simulator/carla/issues/9852).
 >   no sidewalk lanes, so pedestrian navigation runs on 2.5 m strips laid along
 >   the carriageway edges. They approximate where the real sidewalks are (§3.11).
 > - **The Mass bridge is read-only** and must not be run alongside CARLA's
->   Traffic Manager.
+>   Traffic Manager. It mirrors the entities **nearest the spectator**, capped
+>   by `carla.MassBridge.MaxProxies` (150 vehicles) and
+>   `carla.MassBridge.MaxWalkers` (100) — so it shows you the traffic you can
+>   see, not a sample of the whole city, but it is a window, not a census.
 >
 > Good for control, planning, navigation, signalised junctions, pedestrians and
 > LiDAR/radar work. For semantic segmentation, use the camera, not the LiDAR.
@@ -957,7 +960,7 @@ that are CARLA's rather than ours are written up in
 | 98.8 % of the semantic frame `Unlabeled` | 0.5 % | `segmentation_census.py` |
 | no traffic lights at all | 353 lights, 106 junctions, phased | `carla_traffic_lights.py` |
 | no crosswalks | 1,096, as 5,480 polygon points | `carla_traffic_lights.py` |
-| `world.get_actors()` blind to Epic's traffic and crowd | 248 dormant proxies (148 vehicles, 100 pedestrians) | `carla_mass_bridge.py` |
+| `world.get_actors()` blind to Epic's traffic and crowd | 250 dormant proxies (150 vehicles, 100 pedestrians), nearest first | `carla_mass_bridge.py` |
 | `get_random_location_from_navigation()` always `None` | 608 navmesh tiles, walkers walk | `carla_walkers.py` |
 | `ground_projection()` / `project_point()` returned `None` | real locations | `verify_sensors.py` |
 | the server asserted and died mid-run under streaming | no assertions | any of the above |

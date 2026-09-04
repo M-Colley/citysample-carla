@@ -16,6 +16,7 @@
 #include "Carla/Util/BoundingBox.h"
 
 #include "Engine/World.h"
+#include "GameFramework/Pawn.h"
 
 namespace
 {
@@ -49,6 +50,20 @@ namespace
 UCarlaEpisode *UCarlaMassBridgeSubsystem::GetEpisode() const
 {
     return UCarlaStatics::GetCurrentEpisode(GetWorld());
+}
+
+FVector UCarlaMassBridgeSubsystem::GetObserverLocation() const
+{
+    if (const UCarlaEpisode *Episode = GetEpisode())
+    {
+        if (const APawn *Spectator = Episode->GetSpectatorPawn())
+        {
+            return Spectator->GetActorLocation();
+        }
+    }
+    // No spectator yet (very early frames). The origin is a poor guess, but it
+    // is stable, and the next frame will have one.
+    return FVector::ZeroVector;
 }
 
 void UCarlaMassBridgeSubsystem::BeginFrame()
