@@ -463,6 +463,16 @@ if (($lines -join "`n") -notmatch 'Name="SensorTrace"') {
         }
         $block = @(
             '; --- CARLA ray-cast sensor collision channels (added by Integrate-CarlaIntoCitySample.ps1) ---',
+            '; City Sample owns GameTraceChannel1..7 (Ballistic, BallisticLandingTarget,',
+            '; Interactions, Footstep, VehicleComponent, VehicleFrame, VehicleWheels), so',
+            "; CARLA's own slots are unavailable here: its hardcoded ECC_GameTraceChannel2",
+            '; means "BallisticLandingTarget" in this project, and that channel defaults to',
+            '; ECR_Ignore - which is why every ray-cast sensor returned zero points, with no',
+            '; error anywhere. 8/9/10 are the next free slots.',
+            '; They must be >7. CollisionProfile.cpp sorts DefaultChannelResponses ascending',
+            '; before filling ObjectTypeMapping/TraceTypeMapping, so appending at 8/9/10',
+            "; leaves every baked EObjectTypeQuery / ETraceTypeQuery index in City Sample's",
+            '; Blueprints unchanged. Inserting below 7 would silently rewire them.',
             '+DefaultChannelResponses=(Channel=ECC_GameTraceChannel8,DefaultResponse=ECR_Ignore,bTraceType=False,bStaticObject=False,Name="SensorObject")',
             '+DefaultChannelResponses=(Channel=ECC_GameTraceChannel9,DefaultResponse=ECR_Block,bTraceType=True,bStaticObject=False,Name="SensorTrace")',
             '+DefaultChannelResponses=(Channel=ECC_GameTraceChannel10,DefaultResponse=ECR_Overlap,bTraceType=True,bStaticObject=False,Name="OverlapChannel")'

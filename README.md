@@ -750,7 +750,14 @@ Geometry continuity is machine-checked: each `paramPoly3` evaluated at its
 endpoint lands on the next segment's origin to within **2.45 × 10⁻⁵ m** across
 5,452 joins.
 
-**Sensors**, after the collision-channel and segmentation fixes:
+**Sensors**, after the collision-channel and segmentation fixes.
+
+The channel is worth naming, because it is the whole failure in one line: CARLA
+hardcodes `ECC_GameTraceChannel2` for its sensor traces, and in this project
+that slot is `BallisticLandingTarget` with `DefaultResponse=ECR_Ignore`. City
+Sample already owns channels 1–7, so CARLA's rays went out on a channel whose
+default response is to ignore everything, and passed through the world. Nothing
+errored. A LiDAR returning zero points is a valid point cloud.
 
 ```
                         before        after
