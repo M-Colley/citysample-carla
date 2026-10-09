@@ -7,6 +7,7 @@
 
 #include "CoreMinimal.h"
 #include "Subsystems/WorldSubsystem.h"
+#include "UObject/ObjectKey.h"
 
 #include "CarlaFastGeoTagger.generated.h"
 
@@ -71,6 +72,13 @@ private:
 
     /// World time of the last sweep, for the rate limit.
     double LastSweepTime = -1.0;
+
+    /// Label per static mesh ASSET (a crp::CityObjectLabel, stored as its
+    /// uint8). A memo of a pure function of the asset path, not tagging
+    /// state: keyed on object index + serial number, so a reused address or
+    /// slot can never hit an old entry. If ATagger::ReloadPathLabelRules is
+    /// ever wired up at runtime, this must be emptied with it.
+    TMap<FObjectKey, uint8> MeshLabels;
 
     FTimerHandle SweepTimerHandle;
 };

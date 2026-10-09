@@ -179,6 +179,7 @@ void UCarlaFastGeoTaggerSubsystem::Deinitialize()
     // The resolver captures nothing that outlives this module, but leaving a
     // dangling TFunction behind a static would still be a trap on hot reload.
     ATagger::SetHitLabelResolver(nullptr);
+    MeshLabels.Reset();
     Super::Deinitialize();
 }
 
@@ -311,8 +312,30 @@ int32 UCarlaFastGeoTaggerSubsystem::TagFastGeoGeometry()
                 continue;
             }
 
-            const crp::CityObjectLabel Label =
-                ATagger::GetLabelByAssetPath(Mesh->GetPathName());
+            // The rule table once per MESH, not once per component per sweep.
+            // GetLabelByAssetPath builds a path string and allocates a fresh
+            // FString per rule it tries, and the sweep visits ~50,000
+            // components four times a second - for an answer that depends on
+            // nothing but which asset this is.
+            //
+            // This is not the pointer cache the note above forbids. That one
+            // remembered WHETHER A COMPONENT WAS DONE, keyed on an address the
+            // allocator reuses. This remembers WHAT LABEL A MESH ASSET GETS,
+            // keyed on FObjectKey - object index plus serial number - so a
+            // recycled address or slot is a different key, and a miss just
+            // runs the rule table again. Whether each component is actually
+            // tagged is still read from the component itself, every sweep.
+            const FObjectKey MeshKey(Mesh);
+            crp::CityObjectLabel Label;
+            if (const uint8 *Known = MeshLabels.Find(MeshKey))
+            {
+                Label = static_cast<crp::CityObjectLabel>(*Known);
+            }
+            else
+            {
+                Label = ATagger::GetLabelByAssetPath(Mesh->GetPathName());
+                MeshLabels.Add(MeshKey, static_cast<uint8>(Label));
+            }
             if (Label == crp::CityObjectLabel::None)
             {
                 // No rule matches this path, so leave the data untouched
