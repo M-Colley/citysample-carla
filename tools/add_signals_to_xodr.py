@@ -70,6 +70,11 @@ MATCH_RADIUS_M = 6.0
 # with the same heading are the same physical approach.
 SIDE_RADIUS_M = 8.0
 
+# How far an unclaimed lane's end may be from a side's host lane and still be
+# taken as part of that approach when completing a junction: a whole carriageway
+# of one direction, four lanes and a median, fits inside it.
+SIDE_JOIN_M = 2 * SIDE_RADIUS_M
+
 SIGNAL_TYPE = "1000001"          # CARLA: SignalType::IsTrafficLight
 
 # A junction with no traffic light is a STOP-SIGN junction, and that is Epic's
@@ -213,8 +218,13 @@ def build_sides(approaches, lights):
         host = hits[0][1]
         if host.road_id in used:
             continue                                   # side already emitted
+        # Never a road another side already governs. Two lights whose
+        # midpoints lie within SIDE_RADIUS_M of each other would otherwise both
+        # claim the lanes between them, and a lane under two signals - in two
+        # different phases - stops for one while the other says go.
         members = [a for _, a in near(mx, my, SIDE_RADIUS_M)
                    if a.junction == host.junction
+                   and a.road_id not in used
                    and abs(_ang_diff(a.hdg, host.hdg)) < math.radians(25)]
         for m in members:
             used.add(m.road_id)
@@ -225,6 +235,57 @@ def build_sides(approaches, lights):
             "type_index": li["type_index"],
         })
     return by_junction, matched
+
+
+def complete_sides(approaches, by_junction):
+    """Give every approach to a signalised junction a light.
+
+    Lights bind to approaches near one of Epic's authored lights, so a lane can
+    be left over at a junction that does have lights: the outer lane of a wide
+    approach, beyond SIDE_RADIUS_M of the light's midpoint, or a whole side
+    Epic gave no pole of its own (4 of Small City's signalised junctions came
+    out with a single light). Such a lane got neither a light nor a stop sign,
+    and TrafficLightStage routes vehicles on it through as if the junction were
+    unsignalised - into crossing traffic that has green. MassTraffic itself
+    runs the whole intersection on its light cycle once any side has a light
+    (bHasTrafficLights is per intersection).
+
+    A leftover lane joins an existing side that runs the same way, as a
+    reference to that side's light; otherwise it starts a side of its own,
+    which phase_of then puts in a phase by heading like any other. Returns
+    (lanes joined to an existing side, sides added).
+    """
+    claimed = {m.road_id for sides in by_junction.values()
+               for side in sides for m in side["members"]}
+    leftover = defaultdict(list)
+    for a in approaches:
+        if a.junction in by_junction and a.road_id not in claimed:
+            leftover[a.junction].append(a)
+
+    joined = added = 0
+    same_way = math.radians(25)
+    for jid, lanes in leftover.items():
+        sides = by_junction[jid]
+        for a in sorted(lanes, key=lambda a: int(a.road_id)):
+            if a.road_id in claimed:
+                continue
+            near = [(math.hypot(a.x - s["host"].x, a.y - s["host"].y), i)
+                    for i, s in enumerate(sides)
+                    if abs(_ang_diff(a.hdg, s["host"].hdg)) < same_way]
+            near = [(d, i) for d, i in near if d <= SIDE_JOIN_M]
+            if near:
+                sides[min(near)[1]]["members"].append(a)
+                claimed.add(a.road_id)
+                joined += 1
+                continue
+            members = [b for b in lanes if b.road_id not in claimed
+                       and abs(_ang_diff(b.hdg, a.hdg)) < same_way
+                       and math.hypot(b.x - a.x, b.y - a.y) <= SIDE_RADIUS_M]
+            claimed.update(m.road_id for m in members)
+            sides.append({"host": a, "members": members, "hdg": a.hdg,
+                          "type_index": None})
+            added += 1
+    return joined, added
 
 
 def _ang_diff(a: float, b: float) -> float:
@@ -456,10 +517,81 @@ def selftest() -> int:
     if root.find("junction/controller") is None:
         fails.append("junction has no <controller> reference - controller would have no junction")
 
-    # Perpendicular arms must land in different phases.
-    ph = phase_of(by_j["9"]) if "9" in by_j else {}
-    if len(by_j.get("9", [])) == 2 and len(set(ph.values())) != 2:
-        fails.append(f"perpendicular approaches share a phase: {ph}")
+    def approach(rid, x_end, y_end, hdg, length=50.0):
+        """A one-lane road ENDING at (x_end, y_end) on junction 9."""
+        x0, y0 = x_end - length * math.cos(hdg), y_end - length * math.sin(hdg)
+        return f"""<road name="r{rid}" length="{length}" id="{rid}" junction="-1">
+          <link><successor elementType="junction" elementId="9"/></link>
+          <planView><geometry s="0.0" x="{x0}" y="{y0}" hdg="{hdg}" length="{length}">
+            <paramPoly3 aU="0.0" bU="{length}" cU="0.0" dU="0.0" aV="0.0" bV="0.0" cV="0.0" dV="0.0" pRange="normalized"/>
+          </geometry></planView>
+          <lanes><laneOffset s="0.0" a="2.0" b="0.0" c="0.0" d="0.0"/>
+            <laneSection s="0.0"><right><lane id="-1" type="driving" level="false">
+            <width sOffset="0.0" a="4.0" b="0.0" c="0.0" d="0.0"/></lane></right></laneSection>
+          </lanes>
+        </road>"""
+
+    def light_at(x, y):
+        return {"controlled_side_midpoint": list(odr_to_ue(x, y)) + [0.0],
+                "type_index": 0, "position": [0, 0, 0], "z_rotation": 0.0}
+
+    def run(roads_xml, lights_, complete=True):
+        r = ET.fromstring(f"<OpenDRIVE>{roads_xml}<junction id=\"9\" name=\"j9\"/></OpenDRIVE>")
+        aps_ = collect_approaches(r)
+        bj, _ = build_sides(aps_, lights_)
+        if complete:
+            complete_sides(aps_, bj)
+        emit(r, bj)
+        return r, bj
+
+    def governed(r):
+        return {road.get("id") for road in r.findall("road")
+                if road.find("signals/signal") is not None
+                or road.find("signals/signalReference") is not None}
+
+    # Perpendicular arms, one light each: two sides, and they must not share a
+    # phase - opposing traffic would get green together.
+    r2, bj2 = run(approach(1, 2.0, -8.0, math.pi / 2) + approach(2, -8.0, -2.0, 0.0),
+                  [light_at(2.0, -8.0), light_at(-8.0, -2.0)])
+    ph = phase_of(bj2.get("9", []))
+    if len(bj2.get("9", [])) != 2 or len(set(ph.values())) != 2:
+        fails.append(f"perpendicular arms should be two sides in two phases, "
+                     f"got {len(bj2.get('9', []))} side(s), phases {ph}")
+    if len(r2.findall("controller")) != 2:
+        fails.append(f"expected 2 controllers, got {len(r2.findall('controller'))}")
+
+    # Three parallel lanes of one approach, with lights near either end of it.
+    # The middle lane is within reach of both; it must answer to ONE of them.
+    r3, _ = run("".join(approach(i, 3.5 * i, 0.0, math.pi / 2) for i in (1, 2, 3)),
+                [light_at(1.5, 0.0), light_at(13.0, 0.0)])
+    for road in r3.findall("road"):
+        n = len(road.findall("signals/signal")) + len(road.findall("signals/signalReference"))
+        if n > 1:
+            fails.append(f"road {road.get('id')} is governed by {n} signals")
+
+    # A signalised junction where Epic authored a light for only ONE of its two
+    # arms. The other arm used to get nothing - no light and no stop sign - and
+    # its traffic crossed whatever the light showed.
+    arms = approach(1, 2.0, -8.0, math.pi / 2) + approach(2, -8.0, -2.0, 0.0)
+    r4, bj4 = run(arms, [light_at(2.0, -8.0)])
+    if governed(r4) != {"1", "2"}:
+        fails.append(f"only roads {sorted(governed(r4))} are governed; every "
+                     "approach to a signalised junction needs a light")
+    elif len(set(phase_of(bj4["9"]).values())) != 2:
+        fails.append("the arm given a light must run in its own phase")
+    r4_old, _ = run(arms, [light_at(2.0, -8.0)], complete=False)
+    if governed(r4_old) != {"1"}:
+        fails.append("fixture no longer reproduces the uncontrolled arm")
+
+    # A three-lane approach whose outer lane ends beyond SIDE_RADIUS_M of the
+    # light: it belongs to the same light, as a reference - not a second light.
+    r5, _ = run("".join(approach(i, 3.5 * i, 0.0, math.pi / 2) for i in (1, 2, 3)),
+                [light_at(1.0, 0.0)])
+    n_sig = len(r5.findall("road/signals/signal"))
+    n_ref = len(r5.findall("road/signals/signalReference"))
+    if (n_sig, n_ref, len(governed(r5))) != (1, 2, 3):
+        fails.append(f"wide approach: {n_sig} signals, {n_ref} references, "
+                     f"{len(governed(r5))} lanes governed - expected 1, 2, 3")
 
     if fails:
         print("SELFTEST FAILED")
@@ -481,6 +613,11 @@ def main() -> int:
                          "traffic light. They are Epic's stop-sign "
                          "intersections (MassTraffic's bHasTrafficLights is "
                          "false for exactly these), so they are on by default")
+    ap.add_argument("--no-complete-junctions", action="store_true",
+                    help="leave approaches to a signalised junction that no "
+                         "authored light binds to WITHOUT any control, as "
+                         "before. By default they join a side or get a light "
+                         "of their own - see complete_sides")
     ap.add_argument("--selftest", action="store_true")
     args = ap.parse_args()
 
@@ -500,6 +637,8 @@ def main() -> int:
 
     approaches = collect_approaches(root)
     by_junction, matched = build_sides(approaches, lights)
+    joined, added = (0, 0) if args.no_complete_junctions else complete_sides(
+        approaches, by_junction)
     n_sig, n_ref, n_ctl = emit(root, by_junction)
     n_stop, n_stop_junc = (0, 0) if args.no_stop_signs else emit_stop_signs(
         root, approaches, set(by_junction))
@@ -516,6 +655,14 @@ def main() -> int:
     print(f"  lane references       : {n_ref:,}")
     print(f"  controllers (phases)  : {n_ctl:,}")
     print(f"  junctions signalised  : {len(by_junction):,} / {n_junc:,}")
+    print(f"  completed junctions   : {joined:,} lanes joined an authored side, "
+          f"{added:,} sides given a light Epic did not author")
+    governed = {r.get("id") for r in root.findall("road")
+                if r.find("signals/signal") is not None
+                or r.find("signals/signalReference") is not None}
+    bare = sum(1 for a in approaches
+               if a.junction in by_junction and a.road_id not in governed)
+    print(f"  uncontrolled approaches at signalised junctions: {bare:,}")
     print(f"  stop signs emitted    : {n_stop:,} "
           f"across {n_stop_junc:,} unsignalised junctions")
     if not n_sig:
