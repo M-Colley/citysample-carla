@@ -85,6 +85,14 @@ Every Python converter has `--selftest` and needs no server.
   one phase and report "static" for lights that are cycling.
 - **Anything spatial** — the Mass bridge mirrors the entities nearest the
   *spectator*. Park the spectator before counting.
+- **Walkers that move** — `carla_walkers.py` passes when walkers walk, and a
+  walker on an island walks. Whether pedestrians can reach the rest of the city
+  is `xodr_to_recast_obj.py`'s `walkable : N island(s)` line; sidewalks that
+  stopped at every junction once made each block side its own island.
+- **Traffic survival over a short run** — a vehicle dies only when its path
+  reaches a dead end, so a short `carla_validate_xodr.py` run (7.5 s by
+  default) passed a network in which no junction could be entered. Read its `junction entries`
+  and `route reach` lines, not just who is alive.
 
 ## Traps that have already been paid for
 
@@ -99,7 +107,9 @@ are in the code comments too; this is the index.
   reloads containers, and the allocator reuses addresses. A `TSet` of tagged
   component pointers reports new, untagged geometry as finished. One viewpoint
   measured between 0 % and 92 % unlabeled depending on how streaming had cycled.
-  The FastGeo sweep is deliberately stateless; leave it that way.
+  The FastGeo sweep keeps no tagging state; leave it that way. (Its mesh-to-label
+  memo is not this: it remembers what a mesh asset's label IS, keyed on
+  `FObjectKey` - index plus serial number, which a reused address cannot match.)
 - **`MarkRenderStateDirty(true)` on a FastGeo component crashes the server.** It
   queues a component whose `ProxyState` is `Creating` for recreation and trips an
   assertion. It is also unnecessary. Do not "fix" its absence.
@@ -114,9 +124,14 @@ are in the code comments too; this is the index.
   `world.tick()` / `world.wait_for_tick()` and nowhere else. A script that
   `sleep`s sees every walker spawn and then stand still — indistinguishable from
   a broken navmesh.
-- **`set_autopilot(True)` destroys the vehicle** on this map, reproducibly, with
-  no collision and nothing logged. Drive waypoints instead; see `RouteDriver` in
-  `tools/record_carla.py`. Reported upstream.
+- **A junction id must never equal a road id.** CARLA's `RoadParser` keeps a
+  link's `elementId`, drops its `elementType`, and then treats the link as a
+  junction only if no ROAD has that id. Junctions numbered 0..171 beside roads
+  0..3336 made every junction approach a dead end, and the traffic manager
+  silently destroys any vehicle whose path reaches one (`osm_mode` defaults to
+  on). That looked like "`set_autopilot(True)` destroys the vehicle" and was
+  reported upstream as a CARLA bug (issue 9) before the cause was found.
+  `roadnetwork_to_xodr.py --selftest` now checks it.
 
 ## Rules
 
@@ -146,7 +161,7 @@ CityRoadExport/   UE plugin, -run=ExportZoneGraph
 patches/          19 files of CARLA fixes, applied to your CARLA checkout
 config/           [CarlaTagger] label rules, appended to the project's DefaultGame.ini
 docs/             the implementation plan and the showcase video
-ISSUES-TO-FILE.md nine CARLA bugs, four filed upstream
+ISSUES-TO-FILE.md nine CARLA issues, eight filed upstream (#9869 corrected)
 ```
 
 Read `README.md` §10 for what is known-broken before assuming you found

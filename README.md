@@ -45,12 +45,12 @@ Background: [carla#9852](https://github.com/carla-simulator/carla/issues/9852).
 >
 > **Known gaps, measured on the running server (§11):**
 >
-> - **Semantic LiDAR is still unlabeled.** The FastGeo tagger fixes the
->   *camera*, which reads labels from custom primitive data. Semantic LiDAR
->   takes its tag from the physics hit's component instead — a different code
->   path that also cannot see FastGeo primitives. It returns mostly tag 0.
-> - **Road signs are absent.** Stop, yield and speed-limit sign objects are not
->   emitted into the OpenDRIVE. Traffic lights are.
+> - **Semantic LiDAR needs the tagger too.** It labels its hits through the
+>   same FastGeo tagger the camera uses, so without
+>   `carla.FastGeoTagger.Enable 1` it returns mostly tag 0; with it, 3.3 % of
+>   points stay unlabeled (§11).
+> - **Yield and speed-limit signs are absent.** City Sample does not author
+>   them. Traffic lights and stop signs are emitted (§11).
 > - **Sidewalks are synthesised, not measured.** The exported road network has
 >   no sidewalk lanes, so pedestrian navigation runs on 2.5 m strips laid along
 >   the carriageway edges. They approximate where the real sidewalks are (§3.11).
@@ -122,6 +122,11 @@ python tools/zonegraph_to_roadnetwork.py zonegraph.json -o roadnetwork.json
 python tools/roadnetwork_to_xodr.py roadnetwork.json -o SmallCity.xodr
 ```
 
+The second command ends with the dead ends CARLA will see: lanes with no next
+lane, where the traffic manager destroys vehicles. Those "into a junction" are
+a conversion bug and should be 0; the rest should equal the first command's
+`roads_without_successor`, the lanes where the ZoneGraph itself ends.
+
 ### Step 4 — look at it, then drive it
 
 ```bash
@@ -186,7 +191,7 @@ SetupWithBuildTools.bat --skip-content
 ```
 
 Run it **from this repository**, not from your CARLA checkout — it `cd`s to
-`%CARLA_ROOT%` itself, and it finds `toolsetch-carla-content.sh` beside
+`%CARLA_ROOT%` itself, and it finds `tools\fetch-carla-content.sh` beside
 itself. It replaces `CarlaSetup.bat`, which cannot find VS Build Tools
 (issue 1).
 
@@ -295,6 +300,9 @@ python tools/carla_traffic_lights.py --traffic 60 --watch 30
 ```
 
 Both converters have `--selftest` and need no editor and no rebuild.
+`add_signals_to_xodr.py` also gives a light to any approach of a signalised
+junction that none of Epic's lights reaches, and reports how many it added;
+see §9.
 
 > **Three encodings look right and produce nothing.** Worth knowing before you
 > touch this code:
@@ -460,9 +468,10 @@ wrong for most of the pixels; `ATagger` skips them, and
 `[CarlaTagger] bTagHLODProxies=True` in `Config/DefaultGame.ini` turns them on
 with a coarse `Static` if a view is dominated by them.
 
-Note that this only fixes the **camera**. Semantic *LiDAR* tags come from the
-physics hit's component, a different code path that also cannot see FastGeo
-primitives — so semantic LiDAR still returns mostly tag 0. See
+Semantic *LiDAR* takes its tag from the physics hit rather than from custom
+primitive data, so the plugin also installs a hit-label resolver: it walks a
+FastGeo hit back to its component and reads the label the tagger wrote there,
+so the two sensors cannot disagree. Same flag; see
 [Known limitations](#11-known-limitations).
 
 ---
@@ -556,6 +565,20 @@ clear ground (ZoneGraph exports every lane as its own road, so a fixed offset
 would put sidewalks in the middle of the street). They approximate where City
 Sample's real sidewalk meshes are. `--sidewalk-width` and `--no-sidewalks`
 control this.
+
+At junctions the strips wrap the corners: they run on past the end of the
+street, and a kerbside strip follows the outside of each right turn. Before
+that, every strip stopped at the junction, so each side of each block was an
+island its walkers could never leave; the walker check above cannot see this,
+because a walker on an island still walks. On a synthetic 13 × 13 grid the
+walkable surface went from 312 islands (the largest 0.3 % of it) to one
+network. The tool now prints `walkable : N island(s)` and complains when no
+island holds half the area. Check that line for the City Sample.
+
+With `zonegraph_to_roadnetwork.py --keep-sidewalks`, Epic's own pedestrian
+lanes are written to the `.xodr` as `sidewalk` lanes, and this tool meshes
+*them* as the sidewalks instead of synthesising any. That path is not yet
+measured on the City Sample.
 
 ---
 
@@ -750,6 +773,17 @@ Geometry continuity is machine-checked: each `paramPoly3` evaluated at its
 endpoint lands on the next segment's origin to within **2.45 × 10⁻⁵ m** across
 5,452 joins.
 
+> **These numbers predate the junction-id fix, and at the time no lane could be
+> driven into a junction.** The converter numbered junctions 0..171 beside
+> roads 0..3336; CARLA's parser ignores `elementType` and resolves any link
+> whose id is also a road id as a road link, so every road entering a junction
+> had no successor (§11). 2,861 topology pairs for 3,337 one-lane roads is the
+> signature: when junctions can be entered, approach lanes branch and pairs
+> outnumber lanes. The survival figure passed because vehicles only die when
+> their path reaches a dead end, and the tool's default run is 7.5 s. Regenerate the
+> `.xodr` and re-run `carla_validate_xodr.py`, which now also reports
+> `junction entries` and `route reach` and fails on zero entries.
+
 **Sensors**, after the collision-channel and segmentation fixes.
 
 The channel is worth naming, because it is the whole failure in one line: CARLA
@@ -806,6 +840,15 @@ vehicles sampled at a red light   : 47, of which 17 stationary
 
 The all-red step is a real clearance interval, not a fault - a single snapshot
 of a correct junction can legitimately show every light red.
+
+> **The group sizes show a gap, since fixed and not yet re-measured here.**
+> "solo x4" is four signalised junctions with a single light, and every other
+> approach to them had neither a light nor a stop sign, so its traffic crossed
+> whatever the light showed. `add_signals_to_xodr.py` now completes such
+> junctions: a lane no authored light reaches joins the side running its way,
+> or gets a light of its own, phased by heading. It prints how many, plus
+> `uncontrolled approaches at signalised junctions`, which should be 0.
+> `--no-complete-junctions` restores the old output.
 
 **The full city**, CARLA 0.10.0 serving `Small_City_LVL`:
 
@@ -931,13 +974,16 @@ Three settings to change:
    skip `load_world` and attach to the running city. Leave it at
    `"Town10HD_Opt"` and Carlamayo will load a CARLA town **over** the City
    Sample — throwing away the thing you built.
-2. **`NPC_VEHICLE_COUNT = 0`.** Carlamayo spawns NPCs with
-   `SpawnActor(...).then(SetAutopilot(...))`, and autopilot decays on this map
-   (issue 9): vehicles are destroyed mid-drive. Turn the Mass bridge on instead
+2. **`NPC_VEHICLE_COUNT = 0` — unless your `.xodr` was exported after the
+   junction-id fix.** Carlamayo spawns NPCs with
+   `SpawnActor(...).then(SetAutopilot(...))`, and on an older export the
+   traffic manager destroys each one as it reaches a junction (§11). Either
+   regenerate the `.xodr`, or turn the Mass bridge on instead
    (`-ExecCmds "carla.MassBridge.Enable 1"`) and Epic's own traffic — hundreds
    of Mass-driven vehicles and pedestrians, the nearest 250 of them mirrored
    into `world.get_actors()` — is already there, which is closer to what you
-   want than 50 TM-driven NPCs.
+   want than 50 TM-driven NPCs. Not both: the bridge must not run alongside
+   the Traffic Manager.
 3. **`NPC_WALKER_COUNT` can stay at 50.** It uses
    `get_random_location_from_navigation()` and walker controllers, which now
    work. Keep it if you want walkers you control; drop it to 0 if Epic's crowd
@@ -960,22 +1006,35 @@ Everything here was measured on the running server, not inferred.
   flag the camera needs; without it, ray-cast labels fall back to Unlabeled.
 - **Sidewalks are synthesised.** The exported network has no sidewalk lanes, so
   pedestrian navigation runs on 2.5 m strips laid along the carriageway edges,
-  pushed outward until they clear the road. They approximate the real sidewalk
-  meshes; they are not a measurement of them. Some walkers will therefore walk
-  where a City Sample pedestrian would not.
+  pushed outward until they clear the road and wrapped round junction corners.
+  They approximate the real sidewalk meshes; they are not a measurement of
+  them. Some walkers will therefore walk where a City Sample pedestrian would
+  not. `--keep-sidewalks` meshes Epic's own pedestrian lanes instead (part B
+  step 11), not yet measured here.
+- **`get_crosswalks()` reports each crossing half a lane along its own axis.**
+  CARLA measures an object from lane 0 *after* `laneOffset`
+  (`Road::GetDirectedPointIn`), not from the reference line as OpenDRIVE
+  defines it, so on this network every zone it returns is 1.75 m from the
+  painted crossing, along it. The pedestrian navmesh follows the standard and
+  places them exactly. Checked against CARLA's map parser, not on this server.
 - **Yield and speed-limit signs are absent**, because City Sample does not
   author them: its traffic is Mass-driven off the ZoneGraph, and the only
   intersection semantics Epic records are "has a traffic light" or not. Stop
   signs ARE emitted, from exactly that distinction. There are no speed limits
   to export either, so CARLA applies its default 30 km/h.
-- **`set_autopilot(True)` gets the vehicle destroyed.** On this network a
-  vehicle on the traffic manager drives normally and is then removed by the
-  server, reproducibly at the same point, with no collision and nothing logged.
-  It is not dormancy, not streaming and not the geometry: the same car over the
-  same stretch under `apply_control` survives indefinitely. Drive an ego with
-  waypoints instead — `tools/record_carla.py` has a small pure-pursuit
-  `RouteDriver` that does it in 40 lines. Background traffic on autopilot is
-  still useful; expect to lose some of it. Written up as issue 9.
+- **`set_autopilot(True)` got the vehicle destroyed — cause found and fixed in
+  the converter, not yet re-measured on this server.** The traffic manager
+  removed it, and the network was why: CARLA's parser ignores `elementType`
+  and treats a link to junction *k* as a link to road *k* whenever road *k*
+  exists, and the converter numbered junctions 0..171 beside roads 0..3336. So
+  every road entering a junction was a dead end, and the TM destroys any
+  vehicle whose path reaches one — silently, because `osm_mode` defaults to on.
+  `roadnetwork_to_xodr.py` now numbers junctions clear of every road id, which
+  is checked against CARLA's own map parser. Regenerate and redeploy the
+  `.xodr` (part A step 3, then part B step 8). On an older export, drive an ego
+  with waypoints — `tools/record_carla.py`'s `RouteDriver` — and expect it to
+  stop at its first junction too. Written up upstream as issue 9 before the
+  cause was known.
 - **Two traffic systems run at once.** CARLA's game mode does not replace
   Epic's Mass Traffic and Mass Crowd — the CARLA plugin contains no reference
   to Mass at all, and five `BP_Mass*Spawner` actors in `Small_City_LVL` sit

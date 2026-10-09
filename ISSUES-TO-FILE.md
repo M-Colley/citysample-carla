@@ -21,7 +21,7 @@ Verified against `carla-simulator/carla@de3f38e64` (`ue58-dev-carla`) on
 | 6 | [#9872](https://github.com/carla-simulator/carla/issues/9872) | Walker navigation dead on an unbuilt `RecastNavMesh` |
 | 7 | [#9871](https://github.com/carla-simulator/carla/issues/9871) | `get_random_location_from_navigation()` returns `None` forever |
 | 8 | [#9870](https://github.com/carla-simulator/carla/issues/9870) | The two navmesh lookups look in different places |
-| 9 | [#9869](https://github.com/carla-simulator/carla/issues/9869) | Autopilot destroys the vehicle mid-drive |
+| 9 | [#9869](https://github.com/carla-simulator/carla/issues/9869) | ~~Autopilot destroys the vehicle mid-drive~~ — corrected and retitled 2026-10-09: *OpenDRIVE parser ignores a link's elementType* ([comment](https://github.com/carla-simulator/carla/issues/9869#issuecomment-6076656971)) |
 
 Background: [#9852](https://github.com/carla-simulator/carla/issues/9852).
 
@@ -602,6 +602,32 @@ if (Files.IsEmpty())
 ---
 
 ## Issue 9 — a vehicle on autopilot is destroyed after a fixed distance, with no collision and no log
+
+> **The cause was in this repository, not in CARLA — found 2026-10-08, after
+> filing.** The `.xodr` this was measured on numbered its junctions 0..171
+> beside roads 0..3336. `RoadParser` keeps a link's `elementId` and drops its
+> `elementType`, and `MapBuilder::GetLaneNext` treats a successor as a
+> junction only if no *road* has that id (`next_is_junction =
+> !ContainsRoad(next_road)`), so every road entering a junction got no
+> successor lane. The traffic manager's `LocalizationStage` marks any vehicle
+> whose path buffer reaches a lane with no successor for removal and `ALSM`
+> destroys it; `osm_mode` defaults to `true` (`Parameters.h`), which also
+> suppresses the "dead-end roads" message. At 29 km/h the buffer reaches 16 m
+> ahead, so dying at 38 m puts the dead end at about 54 m — and the
+> manual-control run below covered 54 m, so it never ruled this out.
+> Reproduced with CARLA 0.9.16's map parser (the same `GetLaneNext` as
+> `de3f38e64`): with colliding ids no approach lane has a successor; with
+> junction ids moved clear of road ids, the same network branches.
+> `roadnetwork_to_xodr.py` now does that.
+>
+> What is still a CARLA bug is narrower. ASAM OpenDRIVE 1.6/1.7 §2.3.5 says
+> "IDs shall be unique within a class", so a road and a junction may share an
+> id - the file was valid, and the parser misread it. And at default settings
+> the traffic manager destroys a vehicle at a dead end without a word.
+> Corrected upstream on 2026-10-09: #9869 is retitled to the parser bug, its
+> body carries a correction banner, and
+> [the correcting comment](https://github.com/carla-simulator/carla/issues/9869#issuecomment-6076656971)
+> has a 30-line repro that needs no server.
 
 **Title:** Traffic-manager autopilot destroys the vehicle mid-drive on a non-CARLA map
 
