@@ -3,8 +3,8 @@
 roadnetwork_to_xodr.py - convert an extracted road network to ASAM OpenDRIVE 1.4.
 
 Stage 2 of the City Sample -> CARLA map pipeline. Stage 1
-(``ue_export_roadnetwork.py``) runs inside the Unreal editor and writes the
-intermediate JSON this consumes. This half is plain Python with no Unreal
+(``zonegraph_to_roadnetwork.py``, fed by the ExportZoneGraph commandlet) writes
+the intermediate JSON this consumes. This half is plain Python with no Unreal
 dependency, so it can be developed and tested without the editor.
 
     python tools/roadnetwork_to_xodr.py network.json -o CitySample.xodr
@@ -68,6 +68,24 @@ def load_json_any(path: str):
 CM_TO_M = 0.01
 
 
+def junction_id_base(n_roads: int) -> int:
+    """First junction id: the smallest power of ten above every road id.
+
+    Road and junction ids MUST NOT overlap. LibCarla's RoadParser keeps a
+    road link's elementId and throws its elementType away, and
+    MapBuilder::GetLaneNext then decides whether a successor is a junction by
+    asking whether a ROAD with that id exists (`next_is_junction =
+    !ContainsRoad(next_road)`). Junctions numbered 0..J-1 beside roads 0..R-1
+    therefore resolve as roads, every road entering a junction gets no
+    successor lane at all, the traffic manager destroys each vehicle as its
+    path buffer reaches a junction (silently - osm_mode defaults to true), and
+    waypoint.next() returns [] at every junction approach.
+
+    A power of ten keeps junctions recognisable in logs: road 42, junction 10042.
+    """
+    return 10 ** len(str(max(n_roads - 1, 0)))
+
+
 # --------------------------------------------------------------------------
 # coordinate conversion - the single place UE space becomes OpenDRIVE space
 # --------------------------------------------------------------------------
@@ -118,6 +136,7 @@ class Road:
     successor: dict | None = None
     junction: str | None = None
     lane_offset_m: float = 0.0
+    lane_type: str = "driving"
 
 
 def _hermite_to_parampoly3(p0, p1, m0, m1, hdg0):
@@ -185,6 +204,12 @@ def build_road(spec: dict, numeric_id: int) -> Road | None:
         successor=spec.get("successor"),
         junction=spec.get("junction"),
         lane_offset_m=float(spec.get("lane_offset_cm", 0.0)) * CM_TO_M,
+        # Pedestrian lanes (zonegraph_to_roadnetwork --keep-sidewalks) must be
+        # written as sidewalks: as "driving", CARLA routes traffic down them and
+        # spawns vehicles on them. Freeway "entry"/"exit" stay "driving" on
+        # purpose - CARLA's waypoints and traffic manager only use driving lanes,
+        # so typing the ramps would take them out of every route.
+        lane_type="sidewalk" if spec.get("lane_type") == "sidewalk" else "driving",
     )
 
     # Convert once, up front.
@@ -263,70 +288,153 @@ CROSSWALK_PAINT_M = 4.0
 CROSSWALK_MAX_OFFSET_M = 25.0
 
 
+def carla_polyline(g: Geometry) -> list[tuple[float, float, float, float, float]]:
+    """(s, x, y, tx, ty) along one geometry, sampled exactly as LibCarla does.
+
+    GeometryParamPoly3::PreComputeSpline steps the NORMALISED parameter in
+    max(int(length / 0.5), 5) equal intervals and measures s as the running
+    chord length; PosFromDist then interpolates position and tangent linearly
+    between the two samples around s. An object placed at an s worked out any
+    other way - a straight-line projection, or s = p * length - lands
+    somewhere else in CARLA. (tx, ty) is the world-frame tangent, unnormalised,
+    because that is what CARLA interpolates.
+    """
+    n = max(int(float(f"{g.length:.6f}") / 0.5), 5)
+    cos_h, sin_h = math.cos(g.hdg), math.sin(g.hdg)
+    out, s, prev = [], g.s, None
+    for i in range(n + 1):
+        p = i / n
+        u = ((g.du * p + g.cu) * p + g.bu) * p
+        v = ((g.dv * p + g.cv) * p + g.bv) * p
+        du = (3.0 * g.du * p + 2.0 * g.cu) * p + g.bu
+        dv = (3.0 * g.dv * p + 2.0 * g.cv) * p + g.bv
+        x, y = g.x + u * cos_h - v * sin_h, g.y + u * sin_h + v * cos_h
+        if prev is not None:
+            s += math.hypot(x - prev[0], y - prev[1])
+        out.append((s, x, y, du * cos_h - dv * sin_h, du * sin_h + dv * cos_h))
+        prev = (x, y)
+    return out
+
+
+def _bbox(g: Geometry) -> tuple[float, float, float, float]:
+    """Bounding box of one geometry. A cubic lies inside the convex hull of
+    its Bezier control points, so their box contains the whole curve."""
+    cos_h, sin_h = math.cos(g.hdg), math.sin(g.hdg)
+    us = (0.0, g.bu / 3.0, (2.0 * g.bu + g.cu) / 3.0, g.bu + g.cu + g.du)
+    vs = (0.0, g.bv / 3.0, (2.0 * g.bv + g.cv) / 3.0, g.bv + g.cv + g.dv)
+    xs = [g.x + u * cos_h - v * sin_h for u, v in zip(us, vs)]
+    ys = [g.y + u * sin_h + v * cos_h for u, v in zip(us, vs)]
+    return min(xs), min(ys), max(xs), max(ys)
+
+
 def emit_crosswalks(roads, crosswalks, road_elems):
     """Emit <object type="crosswalk"> polygons.
 
-    Two things here are load-bearing:
+    Three things here are load-bearing:
 
     * The outline must be CLOSED - the first corner repeated as the last.
       carla::road::Map::GetAllCrosswalkMesh ends a triangle fan only when it
       sees crosswalk_vertex[start] == crosswalk_vertex[i]; four unrepeated
       corners produce a crosswalk-material mesh with ZERO triangles. Every
       stock town writes five for this reason.
-    * The crossing is bound to a road by projecting onto its geometry, not by
-      distance to the geometry's ORIGIN. Geometry segments here run to ~200 m,
-      so a crossing mid-segment can be ~100 m from the origin and would be
-      bound to the wrong road, or dropped entirely.
+    * The object sits ON a reference line (t = 0), at the point where the
+      crossing cuts it. CARLA does not apply t the way the standard says:
+      0.10's Map::GetAllCrosswalkZones turns the lateral offset by the
+      object's own hdg before applying it, so a crossing written as "t metres
+      across the road, hdg 90 degrees" lands t metres ALONG the road, off the
+      painted crossing. (0.9.16 applies t correctly; at t = 0 the two agree.)
+    * Candidates are found by each geometry's bounding box, and s comes from
+      the curve CARLA actually evaluates (carla_polyline). Indexing segments by
+      their ORIGIN missed long segments whose origin was far from the
+      crossing, and projecting onto the straight line through the origin put
+      crossings on curved roads metres out.
+
+    What remains is CARLA's own deviation, and it cannot be written around
+    without breaking the standard: both 0.9.16 and 0.10 measure an object
+    from lane 0 *after* laneOffset (Road::GetDirectedPointIn), not from the
+    reference line, so in CARLA every crossing sits laneOffset (half a lane)
+    further along its own axis. The navmesh this repository builds follows the
+    standard and is exact.
     """
     if not crosswalks:
-        return 0
+        return 0, 0
 
-    # Grid-index the geometry segments so this is not len(cw) x len(geoms).
-    cell = 50.0
-    grid = {}
+    cell = 25.0
+    grid: dict[tuple[int, int], list] = {}
     for r in roads:
         for g in r.geometries:
-            key = (int(g.x // cell), int(g.y // cell))
-            grid.setdefault(key, []).append((r, g))
+            box = _bbox(g)
+            for cx in range(int(box[0] // cell), int(box[2] // cell) + 1):
+                for cy in range(int(box[1] // cell), int(box[3] // cell) + 1):
+                    grid.setdefault((cx, cy), []).append((r, g, box))
+    polylines: dict[int, list] = {}
 
-    def candidates(x, y):
-        cx, cy = int(x // cell), int(y // cell)
-        span = int(CROSSWALK_MAX_OFFSET_M // cell) + 1
-        for dx in range(-span, span + 1):
-            for dy in range(-span, span + 1):
-                for item in grid.get((cx + dx, cy + dy), ()):
-                    yield item
+    def near(x0, y0, x1, y1):
+        """Geometries whose box overlaps this one, sampled only when they do."""
+        seen = set()
+        for cx in range(int(x0 // cell), int(x1 // cell) + 1):
+            for cy in range(int(y0 // cell), int(y1 // cell) + 1):
+                for r, g, box in grid.get((cx, cy), ()):
+                    if (id(g) in seen or box[2] < x0 or box[0] > x1
+                            or box[3] < y0 or box[1] > y1):
+                        continue
+                    seen.add(id(g))
+                    if id(g) not in polylines:
+                        polylines[id(g)] = carla_polyline(g)
+                    yield r, polylines[id(g)]
 
-    by_road = {}
+    by_road, projected = {}, 0
     for i, cw in enumerate(crosswalks):
         ax, ay, _ = ue_to_odr(cw["a_cm"])
         bx, by, _ = ue_to_odr(cw["b_cm"])
-        mx, my = (ax + bx) / 2.0, (ay + by) / 2.0
-        span = math.hypot(bx - ax, by - ay)
+        dx, dy = bx - ax, by - ay
+        span = math.hypot(dx, dy)
         if span <= 0.5:
             continue
-        cross_hdg = math.atan2(by - ay, bx - ax)
+        cross_hdg = math.atan2(dy, dx)
 
+        # Where the crossing cuts a reference line, nearest its middle.
         best = None
-        for r, g in candidates(mx, my):
-            # Project the centre onto this segment's straight approximation.
-            dx, dy = mx - g.x, my - g.y
-            s_local = dx * math.cos(g.hdg) + dy * math.sin(g.hdg)
-            s_local = max(0.0, min(g.length, s_local))
-            rx = dx - s_local * math.cos(g.hdg)
-            ry = dy - s_local * math.sin(g.hdg)
-            resid = math.hypot(rx, ry)
-            if resid > CROSSWALK_MAX_OFFSET_M:
-                continue
-            if best is None or resid < best[0]:
-                # t is signed: left of the reference line is positive.
-                t = -rx * math.sin(g.hdg) + ry * math.cos(g.hdg)
-                best = (resid, r, g.s + s_local, t, g.hdg)
+        for r, pl in near(min(ax, bx), min(ay, by), max(ax, bx), max(ay, by)):
+            for (s0, x0, y0, tx0, ty0), (s1, x1, y1, tx1, ty1) in zip(pl, pl[1:]):
+                ex, ey = x1 - x0, y1 - y0
+                den = dx * ey - dy * ex
+                if abs(den) < 1e-12:
+                    continue
+                lam = ((x0 - ax) * ey - (y0 - ay) * ex) / den
+                mu = ((x0 - ax) * dy - (y0 - ay) * dx) / den
+                if not (0.0 <= lam <= 1.0 and 0.0 <= mu <= 1.0):
+                    continue
+                if best is None or abs(lam - 0.5) < best[0]:
+                    road_hdg = math.atan2(ty0 + mu * (ty1 - ty0), tx0 + mu * (tx1 - tx0))
+                    best = (abs(lam - 0.5), r, s0 + mu * (s1 - s0), 0.0,
+                            road_hdg, -lam * span, (1.0 - lam) * span)
         if best is None:
-            continue
-        _, road, s_pos, t_pos, road_hdg = best
+            # It crosses no reference line - nearest point instead, with a
+            # lateral offset. Exact in a standard reader and in CARLA 0.9.16;
+            # CARLA 0.10 rotates that offset (see above), so these are counted.
+            mx, my = ax + dx / 2.0, ay + dy / 2.0
+            reach = CROSSWALK_MAX_OFFSET_M
+            for r, pl in near(mx - reach, my - reach, mx + reach, my + reach):
+                for (s0, x0, y0, tx0, ty0), (s1, x1, y1, tx1, ty1) in zip(pl, pl[1:]):
+                    ex, ey = x1 - x0, y1 - y0
+                    ee = ex * ex + ey * ey
+                    mu = 0.0 if ee < 1e-12 else max(0.0, min(1.0, ((mx - x0) * ex + (my - y0) * ey) / ee))
+                    px, py = x0 + mu * ex, y0 + mu * ey
+                    d = math.hypot(mx - px, my - py)
+                    if d <= reach and (best is None or d < best[0]):
+                        tx, ty = tx0 + mu * (tx1 - tx0), ty0 + mu * (ty1 - ty0)
+                        road_hdg = math.atan2(ty, tx)
+                        # t is signed: left of the reference line is positive.
+                        t = (-(mx - px) * math.sin(road_hdg) + (my - py) * math.cos(road_hdg))
+                        best = (d, r, s0 + mu * (s1 - s0), t, road_hdg,
+                                -span / 2.0, span / 2.0)
+            if best is None:
+                continue
+            projected += 1
+        _, road, s_pos, t_pos, road_hdg, u0, u1 = best
         by_road.setdefault(road.numeric_id, []).append(
-            (i, s_pos, t_pos, span, cross_hdg - road_hdg))
+            (i, s_pos, t_pos, u0, u1, cross_hdg - road_hdg))
 
     n = 0
     for road in roads:
@@ -339,25 +447,29 @@ def emit_crosswalks(roads, crosswalks, road_elems):
         objects = elem.find("objects")
         if objects is None:
             objects = ET.SubElement(elem, "objects")
-        for (i, s_pos, t_pos, span, rel_hdg) in items:
+        for (i, s_pos, t_pos, u0, u1, rel_hdg) in items:
+            # length runs along the object's u axis (here, along the crossing)
+            # and width along v, as ASAM defines them.
             obj = ET.SubElement(
                 objects, "object",
                 id=f"cw{road.numeric_id}_{i}", name=f"Crosswalk_{i}",
                 type="crosswalk", s=f"{max(0.0, s_pos):.6f}", t=f"{t_pos:.6f}",
                 zOffset="0.0", hdg=f"{rel_hdg:.6f}", pitch="0.0", roll="0.0",
                 orientation="none",
-                length=f"{CROSSWALK_PAINT_M:.6f}", width=f"{span:.6f}",
+                length=f"{u1 - u0:.6f}", width=f"{CROSSWALK_PAINT_M:.6f}",
                 height="0.0")
             outline = ET.SubElement(obj, "outline")
-            hu, hv = span / 2.0, CROSSWALK_PAINT_M / 2.0
+            hv = CROSSWALK_PAINT_M / 2.0
             # CLOSED ring: first corner repeated. Four corners = zero triangles.
-            ring = ((hu, hv), (hu, -hv), (-hu, -hv), (-hu, hv), (hu, hv))
+            # u0 < 0 < u1 for an anchored crossing, which CARLA 0.10 relies on
+            # when it widens the ends by 1 m each (it extends by sign of u).
+            ring = ((u1, hv), (u1, -hv), (u0, -hv), (u0, hv), (u1, hv))
             for u, v in ring:
                 ET.SubElement(outline, "cornerLocal",
                               u=f"{u:.6f}", v=f"{v:.6f}", z="0.000000",
                               height="0.000000")
             n += 1
-    return n
+    return n, projected
 
 
 def to_xodr(net: dict, name: str = "CitySample") -> ET.ElementTree:
@@ -370,7 +482,10 @@ def to_xodr(net: dict, name: str = "CitySample") -> ET.ElementTree:
             id_map[r.rid] = r.numeric_id
             roads.append(r)
 
-    jn_map = {str(j.get("id")): i for i, j in enumerate(net.get("junctions", []))}
+    # Clear of every road id - see junction_id_base for what overlap costs.
+    jbase = junction_id_base(len(net.get("roads", [])))
+    jn_map = {str(j.get("id")): jbase + i
+              for i, j in enumerate(net.get("junctions", []))}
 
     root = ET.Element("OpenDRIVE")
     xs = [g.x for r in roads for g in r.geometries] or [0.0]
@@ -445,7 +560,7 @@ def to_xodr(net: dict, name: str = "CitySample") -> ET.ElementTree:
         if not r.unidirectional:
             left = ET.SubElement(sec, "left")
             for i in range(n_side, 0, -1):
-                _lane(left, i, r.lane_width_m)
+                _lane(left, i, r.lane_width_m, r.lane_type)
 
         centre = ET.SubElement(sec, "center")
         c_lane = ET.SubElement(centre, "lane", id="0", type="none", level="false")
@@ -460,13 +575,15 @@ def to_xodr(net: dict, name: str = "CitySample") -> ET.ElementTree:
         succ_lane = -1 if (r.successor or {}).get("type") == "road" else None
         pred_lane = -1 if (r.predecessor or {}).get("type") == "road" else None
         for i in range(1, n_side + 1):
-            _lane(right, -i, r.lane_width_m,
+            _lane(right, -i, r.lane_width_m, r.lane_type,
                   link_succ=succ_lane if i == 1 else None,
                   link_pred=pred_lane if i == 1 else None)
 
-    n_cw = emit_crosswalks(roads, net.get("crosswalks", []), road_elems)
+    n_cw, n_projected = emit_crosswalks(roads, net.get("crosswalks", []), road_elems)
     if n_cw:
-        print(f"  {n_cw:,} crosswalk objects")
+        print(f"  {n_cw:,} crosswalk objects"
+              + (f" ({n_projected:,} cross no reference line - placed by projection)"
+                 if n_projected else ""))
 
     for j in net.get("junctions", []):
         jid = jn_map[str(j.get("id"))]
@@ -486,6 +603,55 @@ def to_xodr(net: dict, name: str = "CitySample") -> ET.ElementTree:
     return ET.ElementTree(root)
 
 
+def carla_successors(root: ET.Element) -> dict[int, list[int]]:
+    """Successor roads of every road's lane -1, resolved the way LibCarla does.
+
+    Mirrors MapBuilder::GetLaneNext and GetJunctionLanes for what this tool
+    writes (one lane section, right-hand lanes only), quirks included:
+
+      * RoadParser keeps a link's elementId and drops its elementType, so
+        "is the successor a junction?" means "is there no ROAD with that id?";
+      * a missing <successor> parses as id 0;
+      * a road successor needs a lane-level <successor id> naming a lane the
+        next road has;
+      * a junction successor is every connecting road in it whose road-level
+        predecessor is this road and whose lane links back to this lane - or,
+        for CARLA's reverse-lane branch, whose successor is this road. The
+        junction's <connection incomingRoad> is never consulted.
+
+    An empty list is a dead end: the traffic manager destroys any vehicle whose
+    path buffer reaches one, and waypoint.next() returns [] there.
+    """
+    roads = {int(r.get("id")): r for r in root.findall("road")}
+    conns = {int(j.get("id")): [int(c.get("connectingRoad"))
+                                for c in j.findall("connection")]
+             for j in root.findall("junction")}
+
+    def link(road, tag):
+        e = road.find(f"link/{tag}")
+        return int(e.get("elementId")) if e is not None else 0
+
+    def lane_link(road, tag):
+        """Lane -1's link id, 0 if absent, None if the road has no lane -1."""
+        for lane in road.findall("lanes/laneSection/right/lane"):
+            if lane.get("id") == "-1":
+                e = lane.find(f"link/{tag}")
+                return int(e.get("id")) if e is not None else 0
+        return None
+
+    out = {}
+    for rid, road in roads.items():
+        nxt = link(road, "successor")
+        if nxt in roads:
+            ok = lane_link(road, "successor") == -1 and lane_link(roads[nxt], "predecessor") is not None
+            out[rid] = [nxt] if ok else []
+            continue
+        out[rid] = [c for c in conns.get(nxt, ()) if c in roads and (
+            (link(roads[c], "predecessor") == rid and lane_link(roads[c], "predecessor") == -1)
+            or (link(roads[c], "successor") == rid and lane_link(roads[c], "successor") == -1))]
+    return out
+
+
 # --------------------------------------------------------------------------
 def selftest() -> int:
     """Round-trip a synthetic network and assert the geometry is continuous."""
@@ -502,6 +668,13 @@ def selftest() -> int:
                             i * 50.0],
                     "tangent": [math.cos(ang), math.sin(ang), 0.0]})
 
+    # A crossing laid radially across the curve, mid-way between two of its
+    # points - the case where a straight-line projection went metres wrong.
+    phi = math.radians(33.75)
+    radial = (math.sin(phi), -math.cos(phi))
+    a_cm = [4000.0 + 600.0 * radial[0], 1000.0 + 600.0 * radial[1], 0.0]
+    b_cm = [4000.0 + 1400.0 * radial[0], 1000.0 + 1400.0 * radial[1], 0.0]
+
     net = {
         "source": "selftest",
         "roads": [{"id": "r0", "points": pts, "lane_width_cm": 350.0,
@@ -509,6 +682,7 @@ def selftest() -> int:
                    "successor": {"type": "junction", "id": "j0"}}],
         "junctions": [{"id": "j0", "center": [5000.0, 1000.0, 0.0],
                        "connections": []}],
+        "crosswalks": [{"a_cm": a_cm, "b_cm": b_cm, "path_width_cm": 100.0}],
     }
 
     tree = to_xodr(net, name="selftest")
@@ -557,6 +731,80 @@ def selftest() -> int:
     # Handedness: UE +Y (right) must become OpenDRIVE -Y.
     if ue_to_odr([100.0, 100.0, 0.0]) != (1.0, -1.0, 0.0):
         failures.append("ue_to_odr handedness/scale wrong")
+
+    # The crossing must come back where it was, read the way CARLA reads it:
+    # anchored ON the reference line (t = 0, which CARLA 0.10 needs), at an s
+    # from CARLA's own table, with its two ends on the crossing's endpoints.
+    cw = roads[0].find("objects/object")
+    if cw is None:
+        failures.append("the crossing over the curve was not emitted")
+    else:
+        s_cw, t_cw = float(cw.get("s")), float(cw.get("t"))
+        us = [float(c.get("u")) for c in cw.findall("outline/cornerLocal")]
+        road = build_road(net["roads"][0], 0)
+        g = [g for g in road.geometries if g.s <= s_cw][-1]
+        pl = carla_polyline(g)
+        k = next(i for i in range(1, len(pl)) if pl[i][0] >= s_cw)
+        f = (s_cw - pl[k - 1][0]) / (pl[k][0] - pl[k - 1][0])
+        bx, by, tx, ty = (pl[k - 1][j] + f * (pl[k][j] - pl[k - 1][j]) for j in (1, 2, 3, 4))
+        th = math.atan2(ty, tx) + float(cw.get("hdg"))
+        ends = [(bx + u * math.cos(th), by + u * math.sin(th)) for u in (min(us), max(us))]
+        want = [ue_to_odr(a_cm)[:2], ue_to_odr(b_cm)[:2]]
+        err = max(math.dist(e, w) for e, w in zip(ends, want))
+        if abs(t_cw) > 1e-9:
+            failures.append(f"crossing written with t={t_cw}; CARLA 0.10 rotates t "
+                            "by hdg, so it must sit on the reference line")
+        if err > 1e-3:
+            failures.append(f"crossing decodes {err:.3f} m from where it was laid")
+
+    # Junctions must be ENTERABLE as CARLA resolves them. With junction ids
+    # that were also road ids, every approach came out with no successor at all
+    # - and every check above still passed.
+    def one_lane(rid, x0, y0, x1, y1, **links):
+        tan = [x1 - x0, y1 - y0, 0.0]
+        return {"id": rid, "lane_width_cm": 350.0, "unidirectional": True,
+                "lane_count": 1, "lane_offset_cm": 175.0,
+                "points": [{"pos": [x0, y0, 0.0], "tangent": tan},
+                           {"pos": [x1, y1, 0.0], "tangent": tan}], **links}
+    to_j = {"type": "junction", "id": "J"}
+    cross = to_xodr({
+        "roads": [
+            one_lane("A", 0, 0, 5000, 0, successor=to_j),
+            one_lane("S", 5000, 0, 6000, 0, junction="J",
+                     predecessor={"type": "road", "id": "A", "contact": "end"},
+                     successor={"type": "road", "id": "B", "contact": "start"}),
+            one_lane("T", 5000, 0, 5500, 500, junction="J",
+                     predecessor={"type": "road", "id": "A", "contact": "end"},
+                     successor={"type": "road", "id": "C", "contact": "start"}),
+            one_lane("B", 6000, 0, 11000, 0, predecessor=to_j),
+            one_lane("C", 5500, 500, 5500, 5500, predecessor=to_j),
+        ],
+        "junctions": [{"id": "J", "center": [5250, 0, 0], "connections": [
+            {"incoming": "A", "connecting": c, "contact": "start",
+             "lane_links": [[-1, -1]]} for c in ("S", "T")]}],
+    }, name="crossroads").getroot()
+    rid = {r.get("name"): int(r.get("id")) for r in cross.findall("road")}
+    jids = {int(j.get("id")) for j in cross.findall("junction")}
+    if jids & set(rid.values()):
+        failures.append(f"junction ids {sorted(jids & set(rid.values()))} are also "
+                        "road ids - CARLA resolves those links as roads")
+    nxt = carla_successors(cross)
+    if sorted(nxt.get(rid["A"], [])) != sorted([rid["S"], rid["T"]]):
+        failures.append(f"approach A should continue into S and T, CARLA would "
+                        f"give it {nxt.get(rid['A'])}")
+    if nxt.get(rid["S"]) != [rid["B"]] or nxt.get(rid["T"]) != [rid["C"]]:
+        failures.append("connecting roads must continue into their exits")
+
+    # A pedestrian lane kept with --keep-sidewalks is a SIDEWALK. Written as
+    # "driving", CARLA would route and spawn traffic on it.
+    walk = to_xodr({"roads": [dict(one_lane("P", 0, 0, 5000, 0), lane_type="sidewalk"),
+                              dict(one_lane("R", 0, 900, 5000, 900), lane_type="exit")]},
+                   name="lane-types").getroot()
+    types = {r.get("name"): r.find("lanes/laneSection/right/lane").get("type")
+             for r in walk.findall("road")}
+    if types != {"P": "sidewalk", "R": "driving"}:
+        failures.append(f"lane types written {types}; a pedestrian lane must be "
+                        "'sidewalk' and a ramp must stay 'driving'")
 
     # Lanes: bidirectional road gets one left, one right, one centre.
     sec = roads[0].find("lanes/laneSection")
@@ -613,6 +861,26 @@ def main() -> int:
         print("NOTE: no junctions. CARLA will treat every road as isolated - "
               "vehicles will not turn between them and the traffic manager will "
               "strand them at road ends.", file=sys.stderr)
+
+    # Where CARLA will find no next lane. Each one is a place the traffic
+    # manager destroys a vehicle (silently - osm_mode is on by default) and
+    # waypoint.next() returns []. Ends that run INTO a junction are a bug in
+    # this file; the others are lanes the source network itself ends.
+    by_id = {int(r.get("id")): r for r in root.findall("road")}
+    driven = {rid for rid, r in by_id.items()
+              if r.find("lanes/laneSection/right/lane[@type='driving']") is not None}
+    dead = [rid for rid, nxt in carla_successors(root).items()
+            if not nxt and rid in driven]
+    into_junction = sum(
+        1 for rid in dead
+        if (by_id[rid].find("link/successor") is not None
+            and by_id[rid].find("link/successor").get("elementType") == "junction"))
+    print(f"  dead ends as CARLA resolves them: {len(dead)} "
+          f"({into_junction} into a junction)")
+    if into_junction:
+        print(f"WARNING: {into_junction} roads enter a junction that offers them "
+              "no connecting road - vehicles reaching them are destroyed.",
+              file=sys.stderr)
     return 0
 
 

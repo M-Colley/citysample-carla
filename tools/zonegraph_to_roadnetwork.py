@@ -170,11 +170,14 @@ def convert(doc: dict, *, keep_sidewalks: bool = False) -> dict:
             continue
         prefix = graph.get("actor", "zg")
         crosswalks.extend(extract_crosswalks(lanes))
-        by_index = {ln["index"]: ln for ln in lanes}
 
         def drivable(ln: dict) -> bool:
             if keep_sidewalks:
-                return True
+                # Crossings are already emitted as crosswalk objects. As
+                # sidewalk-typed roads as well they would lay sidewalk area
+                # straight across the carriageway in the navmesh, over the
+                # crosswalk area that tells a walker it is crossing.
+                return "Crosswalk" not in ln.get("tags", [])
             return lane_type(ln.get("tags", [])) != "sidewalk"
 
         # Groups are still needed, but only to identify junctions: an
@@ -210,9 +213,13 @@ def convert(doc: dict, *, keep_sidewalks: bool = False) -> dict:
             jid = lane_to_junction.get(idx)
 
             # Longitudinal links. OpenDRIVE allows one predecessor and one
-            # successor per road; where a lane has several (a fork), prefer the
-            # junction, which is what the fork actually is.
+            # successor per road, and the first link is kept. A fork INTO a
+            # junction loses nothing by that - every branch resolves to the same
+            # junction, which holds them all as connecting roads. A fork between
+            # plain roads has no junction to hold it, so its other branches are
+            # unreachable in CARLA; those are counted, not guessed at.
             succ = pred = None
+            succ_targets = set()
             for lk in ln.get("links", []):
                 t = lk.get("type")
                 if t not in ("Outgoing", "Incoming"):
@@ -230,12 +237,22 @@ def convert(doc: dict, *, keep_sidewalks: bool = False) -> dict:
                 else:
                     stats["unresolved_links"] += 1
                     continue
-                if t == "Outgoing" and succ is None:
-                    succ = cand
+                if t == "Outgoing":
+                    succ_targets.add((cand["type"], cand["id"]))
+                    if succ is None:
+                        succ = cand
                 elif t == "Incoming" and pred is None:
                     pred = cand
+            if len(succ_targets) > 1:
+                stats["forks_outside_junctions"] += 1
             if succ is None and pred is None:
                 stats["roads_without_links"] += 1
+            if succ is None:
+                # Where the SOURCE network ends a lane. Vehicles that reach
+                # one in CARLA are destroyed, so this is the number to compare
+                # with roadnetwork_to_xodr.py's "dead ends" line: anything
+                # there beyond this count was introduced by the conversion.
+                stats["roads_without_successor"] += 1
 
             width = float(ln.get("width_cm", 350.0))
             roads.append({
@@ -260,14 +277,19 @@ def convert(doc: dict, *, keep_sidewalks: bool = False) -> dict:
             if jid:
                 used_junctions.add(jid)
 
-        # Junction records, with connections resolved lane-by-lane.
+        # Junction records, with connections resolved lane-by-lane. Lanes are
+        # grouped by junction once, in lane order, rather than every junction
+        # rescanning every lane.
+        junction_lanes: dict[str, list[dict]] = defaultdict(list)
+        for ln in lanes:
+            jid = lane_to_junction.get(ln["index"])
+            if jid is not None and ln["index"] in emitted:
+                junction_lanes[jid].append(ln)
         for jid in sorted(used_junctions):
             conns = []
             centre = None
-            for ln in lanes:
+            for ln in junction_lanes[jid]:
                 idx = ln["index"]
-                if lane_to_junction.get(idx) != jid or idx not in emitted:
-                    continue
                 if centre is None and ln.get("points"):
                     centre = ln["points"][0]["pos"]
                 for lk in ln.get("links", []):
