@@ -47,6 +47,31 @@ def read_xodr(path: str) -> str:
     raise ValueError(f"{path} does not look like OpenDRIVE in any known encoding")
 
 
+def route_reach(cmap, spawns, walks: int = 200, metres: float = 500.0,
+                step: float = 5.0) -> list[float]:
+    """How far random drives along waypoint.next() get from random spawn points.
+
+    Pure topology - no physics, no traffic manager. Counting segments and spawn
+    points cannot tell a working network from one where no junction can be
+    entered: both report thousands of each. A walk can. This is the test that
+    was missing when every junction approach in the exported city resolved to
+    a dead end and the TM silently destroyed the vehicles reaching them.
+    """
+    rng = random.Random(0)
+    out = []
+    for _ in range(walks):
+        wp = cmap.get_waypoint(rng.choice(spawns).location)
+        dist = 0.0
+        while wp is not None and dist < metres:
+            nxt = wp.next(step)
+            if not nxt:
+                break
+            wp = rng.choice(nxt)
+            dist += step
+        out.append(dist)
+    return out
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[1])
     ap.add_argument("xodr")
@@ -92,8 +117,13 @@ def main() -> int:
     spawns = cmap.get_spawn_points()
     wps = cmap.generate_waypoints(5.0)
     junction_wps = [w for w in wps if w.is_junction]
+    # A pair (a, b) with a outside a junction and b inside it is a lane that
+    # can actually be driven INTO a junction. Zero of them, on a map that has
+    # junctions, means every intersection is a wall.
+    entries = sum(1 for a, b in topo if not a.is_junction and b.is_junction)
     print(f"\nroad network:")
     print(f"  topology segments : {len(topo):,}")
+    print(f"  junction entries  : {entries:,}")
     print(f"  waypoints @5m     : {len(wps):,}  ({len(junction_wps):,} in junctions)")
     print(f"  spawn points      : {len(spawns):,}")
 
@@ -102,6 +132,16 @@ def main() -> int:
               "lanes - the network is geometrically present but not routable.",
               file=sys.stderr)
         return 1
+
+    reach = sorted(route_reach(cmap, spawns))
+    far = sum(1 for d in reach if d >= 500.0)
+    print(f"  route reach       : {far}/{len(reach)} random drives went 500 m "
+          f"(median {reach[len(reach) // 2]:.0f} m)")
+    junctions_ok = entries > 0 or not junction_wps
+    if not junctions_ok:
+        print("\nNo lane leads into any junction. Check that no <junction id> is "
+              "also a <road id>: CARLA ignores elementType and treats such a link "
+              "as a road link.", file=sys.stderr)
 
     # --- test 1: can a vehicle physically drive the roads? ----------------
     # Done first and without the traffic manager, because the TM is the fragile
@@ -239,9 +279,15 @@ def main() -> int:
         except RuntimeError:
             pass
 
-    ok = alive >= len(actors) * 0.6 and moving >= max(1, alive // 2)
-    print(f"\nVERDICT: {'PASS' if ok else 'FAIL'} - the traffic manager "
-          f"{'routes vehicles on the extracted network' if ok else 'could not drive most vehicles'}")
+    # Survival over a few seconds is NOT enough on its own: a vehicle only dies
+    # when its path reaches a dead end, so a short run passes a network whose
+    # junctions cannot be entered at all. The topology check above is what
+    # catches that.
+    ok = alive >= len(actors) * 0.6 and moving >= max(1, alive // 2) and junctions_ok
+    verdict = ('routes vehicles on the extracted network' if ok
+               else 'cannot enter any junction' if not junctions_ok
+               else 'could not drive most vehicles')
+    print(f"\nVERDICT: {'PASS' if ok else 'FAIL'} - the network {verdict}")
     return 0 if ok else 1
 
 

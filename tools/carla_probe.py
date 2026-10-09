@@ -178,6 +178,18 @@ def main() -> int:
         print(f"  spawn points  : {len(spawns):,}")
         topo = cmap.get_topology()
         print(f"  road segments : {len(topo):,}")
+        # Whether junctions can be ENTERED, which no count above shows and a
+        # few seconds of traffic does not either: vehicles only die when their
+        # path reaches a dead end. An .xodr whose junction ids were also road
+        # ids reports 0 here and every junction approach is a dead end.
+        entries = sum(1 for a, b in topo if not a.is_junction and b.is_junction)
+        print(f"  junction entries: {entries:,}"
+              f"{'   <-- NONE: regenerate the .xodr (README section 11)' if not entries else ''}")
+        if spawns:
+            from carla_validate_xodr import route_reach
+            reach = sorted(route_reach(cmap, spawns))
+            print(f"  route reach   : {sum(d >= 500.0 for d in reach)}/{len(reach)} random "
+                  f"drives went 500 m (median {reach[len(reach) // 2]:.0f} m)")
 
         # The extent of the drivable area is the cheapest signal that we are on the
         # City Sample and not on a stock CARLA town: Small City spans ~2 km.

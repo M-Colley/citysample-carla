@@ -62,6 +62,10 @@ def main() -> int:
     print(f"  landmarks              : {len(landmarks):,}")
     if landmarks:
         print(f"  types: {dict(collections.Counter(l.type for l in landmarks).most_common(5))}")
+    # Each crossing comes back as a closed ring of five points.
+    zone_points = cmap.get_crosswalks()
+    print(f"  crosswalk zone points  : {len(zone_points):,}  "
+          f"({len(zone_points) // 5:,} crossings)")
 
     if not lights:
         print("\nNO TRAFFIC LIGHTS. Things to check, in order:")
