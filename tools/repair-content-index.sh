@@ -5,7 +5,10 @@
 # then left with every entry staged as deleted, and "git lfs pull" quite
 # correctly does nothing because git believes there are no files to check out.
 set -u
-CARLA_ROOT="${CARLA_ROOT:-/c/carla-ue58/carla}"
+# CARLA_DIR as well, like fetch-carla-content.sh: it is the one variable the
+# README tells you to set, and a repair aimed at the default path would reset
+# some other checkout's index.
+CARLA_ROOT="${CARLA_ROOT:-${CARLA_DIR:-/c/carla-ue58/carla}}"
 C="${DEST:-$CARLA_ROOT/Unreal/CarlaUnreal/Content/Carla}"
 cd "$C" || exit 1
 

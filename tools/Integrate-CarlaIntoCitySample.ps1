@@ -74,6 +74,17 @@ function Remove-Tree([string]$p) {
     }
 }
 
+# Insert $new after index $at. Slicing $lines[($at + 1)..($lines.Count - 1)]
+# looks equivalent and is not: when $at is the last line that range runs
+# BACKWARDS (Count..Count-1), PowerShell silently skips the out-of-range index,
+# and the file's last line comes out twice. Negative indices wrap from the end,
+# so $lines[0..-1] is no safer at the other end.
+function Insert-After([object[]]$lines, [int]$at, [object[]]$new) {
+    $head = if ($at -ge 0) { @($lines[0..$at]) } else { @() }
+    $tail = if ($at + 1 -le $lines.Count - 1) { @($lines[($at + 1)..($lines.Count - 1)]) } else { @() }
+    return @($head) + @($new) + @($tail)
+}
+
 # Backups are taken once, from the pristine file, so repeated runs stay
 # revertible to the original rather than to the last patched state.
 function Backup([string]$path) {
@@ -482,7 +493,7 @@ if (($lines -join "`n") -notmatch 'Name="SensorTrace"') {
                             "CapsuleWhileRagdolled", "PawnInteraction", "CitySampleInteraction")) {
             $block += "+EditProfiles=(Name=`"$prof`",CustomResponses=((Channel=`"SensorTrace`",Response=ECR_Ignore),(Channel=`"OverlapChannel`",Response=ECR_Ignore)))"
         }
-        $lines = $lines[0..$end] + $block + $lines[($end + 1)..($lines.Count - 1)]
+        $lines = Insert-After $lines $end $block
         Ok "collision channels 8/9/10 (SensorObject / SensorTrace / OverlapChannel)"
     } else {
         Note "[/Script/Engine.CollisionProfile] not found - add the channels by hand"
@@ -498,7 +509,8 @@ if (($lines -join "`n") -notmatch 'Name="SensorTrace"') {
 if (($lines -join "`n") -notmatch 'r\.CARLA\.EnableSegmentationRendering') {
     $sysIdx = ($lines | Select-String -Pattern '^\[SystemSettings\]' | Select-Object -First 1).LineNumber
     if ($sysIdx) {
-        $lines = $lines[0..($sysIdx - 1)] + @('r.CARLA.EnableSegmentationRendering=1') + $lines[$sysIdx..($lines.Count - 1)]
+        # LineNumber is 1-based, so $sysIdx - 1 is the header's own index.
+        $lines = Insert-After $lines ($sysIdx - 1) @('r.CARLA.EnableSegmentationRendering=1')
     } else {
         $lines += @('', '[SystemSettings]', 'r.CARLA.EnableSegmentationRendering=1')
     }

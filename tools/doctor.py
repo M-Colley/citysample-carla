@@ -46,7 +46,8 @@ def run(cmd: list[str], timeout: int = 15) -> str | None:
         return None
     if out.returncode != 0:
         return None
-    return (out.stdout or out.returncode and "" or out.stdout).strip()
+    # Some tools print their version to stderr.
+    return (out.stdout or out.stderr or "").strip()
 
 
 def check_tool(name: str, cmd: list[str] | None = None, required: bool = True) -> str | None:
@@ -79,6 +80,9 @@ def check_disk(part_a: bool = False) -> None:
         elif free_gb >= need:
             status = WARN
             note = f" -- only {free_gb - need:,.0f} GiB spare; cooking needs slack"
+        elif part_a:
+            status = WARN
+            note = " -- not enough for a City Sample project on this drive"
         elif free_gb >= floor:
             status = WARN
             note = " -- enough for the engine, not for engine + CARLA + City Sample"
@@ -109,14 +113,42 @@ def check_gpu() -> None:
         record(OK, "VRAM", f"{gb:.1f} GB")
 
 
+def check_netfx() -> None:
+    """UBT will not build an editor module without it ("Could not find
+    NetFxSDK", README section 5) - and part A builds one: CityRoadExport."""
+    try:
+        import winreg
+    except ImportError:
+        return
+    for path in (r"SOFTWARE\WOW6432Node\Microsoft\Microsoft SDKs\NETFXSDK",
+                 r"SOFTWARE\Microsoft\Microsoft SDKs\NETFXSDK"):
+        try:
+            with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, path) as key:
+                versions = [winreg.EnumKey(key, i)
+                            for i in range(winreg.QueryInfoKey(key)[0])]
+        except OSError:
+            continue
+        if versions:
+            record(OK, ".NET Framework SDK", ", ".join(versions))
+            return
+    record(BAD, ".NET Framework SDK",
+           "NETFXSDK not registered - run tools/Install-NetFxSdk.ps1")
+
+
 def check_windows(part_a: bool = False) -> None:
     record(OK, "side", "Windows host - builds and runs the CARLA server")
     check_disk(part_a)
-    check_gpu()
-    check_tool("git", ["git", "--version"])
-    check_tool("cmake", ["cmake", "--version"])   # CARLA needs >= 3.27.2
-    check_tool("ninja", ["ninja", "--version"])
+    # Part A exports the road network from the stock UE 5.8 editor: it never
+    # builds the engine fork or CARLA and runs its commandlet with -nullrhi, so
+    # cmake, ninja and a GPU are part B requirements only. Checking them here
+    # failed a part-A machine for tools it will never use.
+    if not part_a:
+        check_gpu()
+        check_tool("git", ["git", "--version"])
+        check_tool("cmake", ["cmake", "--version"])   # CARLA needs >= 3.27.2
+        check_tool("ninja", ["ninja", "--version"])
     check_tool("python", ["python", "--version"])
+    check_netfx()
 
     # Visual Studio 2022 with the C++ toolset.
     vswhere = os.path.join(
@@ -126,15 +158,29 @@ def check_windows(part_a: bool = False) -> None:
     if not os.path.exists(vswhere):
         record(BAD, "Visual Studio 2022", "vswhere.exe not found")
     else:
-        got = run([vswhere, "-latest", "-products", "*", "-requires",
-                   "Microsoft.VisualStudio.Component.VC.Tools.x86.x64",
-                   "-format", "value", "-property", "installationPath"])
-        record(OK if got else BAD, "Visual Studio 2022 C++ toolset",
-               got or "installed, but the C++ x64 toolset component is missing")
+        def find(*version):
+            return run([vswhere, "-latest", *version, "-products", "*", "-requires",
+                        "Microsoft.VisualStudio.Component.VC.Tools.x86.x64",
+                        "-format", "value", "-property", "displayName"])
+        # Ask for 2022 by version. "-latest" alone happily returns VS 2026 (18.x),
+        # which this check then reported as the 2022 toolset the build needs -
+        # and SetupWithBuildTools.bat looks for the 2022 Build Tools by path.
+        vs2022 = find("-version", "[17.0,18.0)")
+        other = None if vs2022 else find()
+        if vs2022:
+            record(OK, "Visual Studio 2022 C++ toolset", vs2022)
+        elif other:
+            record(WARN, "Visual Studio 2022 C++ toolset",
+                   f"only {other} - UE 5.8 and SetupWithBuildTools.bat expect 2022")
+        else:
+            record(BAD, "Visual Studio 2022 C++ toolset",
+                   "no Visual Studio with the C++ x64 toolset component")
 
     # The CARLA UE fork is gated: you must link GitHub <-> Epic Games.
     ue = os.environ.get("CARLA_UNREAL_ENGINE_PATH")
-    if ue and os.path.isdir(ue):
+    if part_a:
+        pass                                # part A uses the launcher's UE 5.8
+    elif ue and os.path.isdir(ue):
         record(OK, "CARLA_UNREAL_ENGINE_PATH", ue)
     else:
         record(
