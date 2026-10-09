@@ -99,6 +99,20 @@ def lidar_topdown(measurement, span_m=60.0) -> np.ndarray:
     return img
 
 
+def take(q: queue.Queue, frame: int, timeout: float = 20.0):
+    """The measurement this sensor made at `frame`, discarding older ones.
+
+    Matched on the frame id, not on queue order. Sensor data streams in
+    asynchronously, so a frame from the last settle tick can land after the
+    settle loop drained its queue; taking "the next item" then left that one
+    panel a tick behind the other three for the entire recording, silently.
+    """
+    while True:
+        data = q.get(timeout=timeout)
+        if data.frame >= frame:
+            return data
+
+
 def label_panel(arr: np.ndarray, text: str) -> Image.Image:
     im = Image.fromarray(arr)
     d = ImageDraw.Draw(im)
@@ -110,16 +124,18 @@ def label_panel(arr: np.ndarray, text: str) -> Image.Image:
 class RouteDriver:
     """Drive a vehicle along the OpenDRIVE network with pure pursuit.
 
-    Not carla.Vehicle.set_autopilot(). The traffic manager reproducibly gets the
-    ego destroyed on this map: from the first spawn point it dies at tick 156
-    every single time, with no collision recorded, its state going straight from
-    Active to PendingKill. Manual control over the same stretch survives
-    indefinitely, so it is the traffic manager rather than streaming, dormancy
-    or geometry - see README section 11.
+    Not carla.Vehicle.set_autopilot(). On the network as first exported, the
+    traffic manager destroyed the ego at tick 156 from the first spawn point,
+    every time, with no collision. That was the network, not the TM: every
+    junction id was also a road id, so CARLA resolved every junction approach
+    as a dead end, and the TM removes any vehicle whose path buffer reaches a
+    dead end - silently, because osm_mode defaults to on. roadnetwork_to_xodr.py
+    now numbers junctions clear of roads; an .xodr exported before that fix
+    still behaves this way, and this driver would stop at its first junction.
 
-    Following waypoints instead sidesteps that, and demonstrates the thing this
-    whole project exists for: the route comes from the exported road network, so
-    if the car drives, the OpenDRIVE is right.
+    Following waypoints also keeps the shot deterministic, and demonstrates the
+    thing this whole project exists for: the route comes from the exported road
+    network, so if the car drives, the OpenDRIVE is right.
     """
 
     def __init__(self, vehicle, carla_map, step=2.0, lookahead=6.0, target_kmh=28.0):
@@ -227,6 +243,12 @@ def main() -> int:
     PANEL_H = PANEL_W * 9 // 16
     PANEL_H -= PANEL_H % 2
 
+    # Before anything else: without ffmpeg there is nothing to record INTO,
+    # and finding that out after the settle and the drive wastes both.
+    if shutil.which("ffmpeg") is None:
+        print("ffmpeg is not on PATH - it encodes the video")
+        return 1
+
     client = carla.Client(args.host, args.port)
     client.set_timeout(args.timeout)
     world = client.get_world()
@@ -234,7 +256,7 @@ def main() -> int:
     tm = client.get_trafficmanager()
 
     original = world.get_settings()
-    ego = cams = None
+    ego = encoder = ffmpeg_log = None
     sensors, vehicles, walkers, controllers = [], [], [], []
     tmpdir = tempfile.mkdtemp(prefix="carla-rec-")
     try:
@@ -393,12 +415,28 @@ def main() -> int:
             return 1
 
         # --- record ------------------------------------------------------
+        # Frames go straight into ffmpeg as raw RGB, encoded while the next
+        # one renders. Saving a PNG per frame and encoding the sequence after
+        # cost ~57 ms of compression per frame inside this synchronous loop,
+        # with the server waiting, and ~0.6 MB of disk each - for a video
+        # whose pixels come out the same either way.
+        size = (PANEL_W * 2, PANEL_H * 2 + 34)
+        ffmpeg_log = open(os.path.join(tmpdir, "ffmpeg.log"), "w+b")
+        encoder = subprocess.Popen(
+            ["ffmpeg", "-y", "-loglevel", "error",
+             "-f", "rawvideo", "-pix_fmt", "rgb24", "-s", f"{size[0]}x{size[1]}",
+             "-framerate", str(args.fps), "-i", "-",
+             # yuv420p + even dimensions, or the file plays nowhere.
+             "-vf", "scale=trunc(iw/2)*2:trunc(ih/2)*2",
+             "-c:v", "libx264", "-pix_fmt", "yuv420p", "-crf", "20",
+             args.output],
+            stdin=subprocess.PIPE, stderr=ffmpeg_log)
         total = int(args.seconds * args.fps)
-        print(f"recording {total} frames at {args.fps} fps")
+        print(f"recording {total} frames at {args.fps} fps -> {args.output}")
         written = 0
         near_v = near_w = 0
         for n in range(total):
-            world.tick()
+            frame = world.tick()
 
             # Keep the spectator on the ego. Two reasons, and the second one is
             # not cosmetic: World Partition streams around the spectator, so an
@@ -418,12 +456,10 @@ def main() -> int:
 
             try:
                 # Every sensor has sensor_tick == the world step, so each tick
-                # yields exactly one frame from each. Take them in lockstep so
-                # the four panels are the same instant.
-                f_rgb = queues[rgb.id].get(timeout=20.0)
-                f_seg = queues[seg.id].get(timeout=20.0)
-                f_dep = queues[dep.id].get(timeout=20.0)
-                f_lid = queues[lid.id].get(timeout=20.0)
+                # yields one frame from each. Take the ones stamped with THIS
+                # tick so the four panels are the same instant.
+                f_rgb, f_seg, f_dep, f_lid = (take(queues[s.id], frame)
+                                              for s in (rgb, seg, dep, lid))
             except queue.Empty:
                 print(f"  frame {n}: a sensor did not deliver, stopping early")
                 break
@@ -437,7 +473,7 @@ def main() -> int:
                 label_panel(lidar_topdown(f_lid),
                             "sensor.lidar.ray_cast  (top down, 60 m)"),
             ]
-            sheet = Image.new("RGB", (PANEL_W * 2, PANEL_H * 2 + 34), (12, 12, 14))
+            sheet = Image.new("RGB", size, (12, 12, 14))
             for i, p in enumerate(panels):
                 sheet.paste(p, ((i % 2) * PANEL_W, (i // 2) * PANEL_H))
 
@@ -446,9 +482,9 @@ def main() -> int:
             light = ego_light_state(ego)
             loc = ego.get_location()
             # Count from the world, not from our own spawn lists: the traffic
-            # manager destroys some of what we spawned (issue 9), and with the
-            # Mass bridge on the interesting vehicles are Epic's, which we never
-            # spawned at all.
+            # manager destroys whatever reaches a dead end in the network, and
+            # with the Mass bridge on the interesting vehicles are Epic's,
+            # which we never spawned at all.
             if n % 5 == 0:
                 snap = world.get_actors()
                 near_v = sum(1 for v in snap.filter("vehicle.*")
@@ -471,29 +507,33 @@ def main() -> int:
             d.text((sheet.width - 150, y), f"traffic light: {light}",
                    fill=LIGHT_COLOUR.get(light, (150, 150, 150)))
 
-            sheet.save(os.path.join(tmpdir, f"f{n:05d}.png"))
+            try:
+                encoder.stdin.write(sheet.tobytes())
+            except (BrokenPipeError, OSError):
+                print(f"  frame {n}: ffmpeg stopped taking frames, stopping early")
+                break
             written += 1
             if (n + 1) % (args.fps * 2) == 0:
                 print(f"  {n + 1}/{total}")
 
+        # --- encode ------------------------------------------------------
+        try:
+            encoder.stdin.close()
+        except OSError:
+            pass
+        rc = encoder.wait()
+        encoder = None
         if not written:
             print("no frames recorded")
+            if os.path.exists(args.output):
+                os.remove(args.output)
             return 1
-
-        # --- encode ------------------------------------------------------
-        print(f"\nencoding {written} frames -> {args.output}")
-        cmd = ["ffmpeg", "-y", "-loglevel", "error",
-               "-framerate", str(args.fps),
-               "-i", os.path.join(tmpdir, "f%05d.png"),
-               # yuv420p + even dimensions, or the file plays nowhere.
-               "-vf", "scale=trunc(iw/2)*2:trunc(ih/2)*2",
-               "-c:v", "libx264", "-pix_fmt", "yuv420p", "-crf", "20",
-               args.output]
-        r = subprocess.run(cmd, capture_output=True, text=True)
-        if r.returncode != 0:
-            print("ffmpeg failed:\n" + (r.stderr or "")[-2000:])
+        if rc != 0:
+            ffmpeg_log.seek(0)
+            print("ffmpeg failed:\n" + ffmpeg_log.read().decode(errors="replace")[-2000:])
             return 1
-        print(f"  {args.output}  {os.path.getsize(args.output) / 1e6:.1f} MB")
+        print(f"  {written} frames, {args.output}  "
+              f"{os.path.getsize(args.output) / 1e6:.1f} MB")
 
         if args.gif:
             gif = os.path.splitext(args.output)[0] + ".gif"
@@ -513,6 +553,16 @@ def main() -> int:
         return 0
     finally:
         print("\ncleaning up")
+        if encoder is not None:
+            # Interrupted mid-recording: let ffmpeg finish what it was given,
+            # so the frames recorded so far are still a playable video.
+            try:
+                encoder.stdin.close()
+                encoder.wait(timeout=60)
+            except (OSError, subprocess.TimeoutExpired):
+                encoder.kill()
+        if ffmpeg_log is not None:
+            ffmpeg_log.close()          # an open file would pin tmpdir on Windows
         for s in sensors:
             try:
                 s.stop()
