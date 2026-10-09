@@ -63,6 +63,7 @@ def main() -> int:
         import matplotlib
         matplotlib.use("Agg")
         import matplotlib.pyplot as plt
+        from matplotlib.collections import LineCollection
     except ImportError:
         print("needs matplotlib:  pip install matplotlib", file=sys.stderr)
         return 2
@@ -75,21 +76,26 @@ def main() -> int:
     fig.patch.set_facecolor("#12161a")
     ax.set_facecolor("#12161a")
 
-    n_ord = n_jn = 0
+    ordinary, connecting = [], []
     total_len = 0.0
     for r in roads:
         xs, ys = road_points(r)
         if len(xs) < 2:
             continue
         total_len += float(r.get("length", 0))
-        if r.get("junction", "-1") != "-1":
-            ax.plot(xs, ys, "-", color="#e0982f", linewidth=0.45, alpha=0.85,
-                    solid_capstyle="round", zorder=2)
-            n_jn += 1
-        else:
-            ax.plot(xs, ys, "-", color="#7ea6d2", linewidth=0.7, alpha=0.9,
-                    solid_capstyle="round", zorder=1)
-            n_ord += 1
+        (connecting if r.get("junction", "-1") != "-1" else ordinary).append(
+            list(zip(xs, ys)))
+    n_ord, n_jn = len(ordinary), len(connecting)
+
+    # One collection per kind rather than one plot() per road: the same paths
+    # in the same order, but a city's 3,000+ separate Line2D artists were most
+    # of this tool's run time.
+    for lines, colour, width, alpha, z in ((ordinary, "#7ea6d2", 0.7, 0.9, 1),
+                                           (connecting, "#e0982f", 0.45, 0.85, 2)):
+        ax.add_collection(LineCollection(
+            lines, colors=colour, linewidths=width, alpha=alpha,
+            capstyle="round", joinstyle="round", zorder=z))
+    ax.autoscale_view()
 
     ax.set_aspect("equal")
     ax.axis("off")

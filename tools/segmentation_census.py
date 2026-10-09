@@ -18,6 +18,7 @@ number that means nothing.
 from __future__ import annotations
 
 import argparse
+import collections
 import queue
 import sys
 import time
@@ -99,11 +100,7 @@ def main() -> int:
             return 1
 
         # Raw BGRA; the label is the red channel.
-        raw = bytes(image.raw_data)
-        hist = {}
-        for i in range(2, len(raw), 4):
-            v = raw[i]
-            hist[v] = hist.get(v, 0) + 1
+        hist = collections.Counter(bytes(image.raw_data)[2::4])
         total = sum(hist.values())
 
         print(f"\n=== {image.width}x{image.height}, {total:,} pixels ===")
