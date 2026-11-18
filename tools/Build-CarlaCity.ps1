@@ -29,6 +29,7 @@ param(
     [string] $CitySample = $(if ($env:CITYSAMPLE_DIR) { $env:CITYSAMPLE_DIR }
                        else { Join-Path $env:USERPROFILE "Documents\Unreal Projects\CitySample" }),
     [string] $EnginePath = $(if ($env:CARLA_UE_DIR) { $env:CARLA_UE_DIR }
+                       elseif ($env:CARLA_UNREAL_ENGINE_PATH) { $env:CARLA_UNREAL_ENGINE_PATH }
                        else { "C:\carla-ue58\UnrealEngine5_carla" }),
     [ValidateSet("Development", "DebugGame", "")]
     [string] $Configuration = "",
@@ -46,6 +47,12 @@ foreach ($p in @($uproject, $buildBat)) {
 }
 if (-not (Test-Path (Join-Path $CitySample "Plugins\Carla"))) {
     throw "CARLA is not integrated yet - run tools\Integrate-CarlaIntoCitySample.ps1 first"
+}
+$carlaPlugin = Join-Path $CitySample "Plugins\Carla\Carla.uplugin"
+$carlaVersion = (Get-Content -LiteralPath $carlaPlugin -Raw | ConvertFrom-Json).VersionName
+if ($carlaVersion -eq "1.0" -and -not $env:DLSS_SDK) {
+    # The release engine accepts this value to build without the optional SDK.
+    $env:DLSS_SDK = "disabled"
 }
 if (-not (Test-Path $LogDir)) { New-Item -ItemType Directory -Path $LogDir -Force | Out-Null }
 

@@ -27,6 +27,7 @@ param(
     [string] $CitySample = $(if ($env:CITYSAMPLE_DIR) { $env:CITYSAMPLE_DIR }
                        else { Join-Path $env:USERPROFILE "Documents\Unreal Projects\CitySample" }),
     [string] $EnginePath = $(if ($env:CARLA_UE_DIR) { $env:CARLA_UE_DIR }
+                       elseif ($env:CARLA_UNREAL_ENGINE_PATH) { $env:CARLA_UNREAL_ENGINE_PATH }
                        else { "C:\carla-ue58\UnrealEngine5_carla" }),
     # Only used to warn when the project's copy of the CARLA plugin is stale.
     [string] $CarlaRepo  = $(if ($env:CARLA_DIR) { $env:CARLA_DIR }

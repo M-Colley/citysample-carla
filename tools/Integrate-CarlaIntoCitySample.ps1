@@ -32,6 +32,15 @@
 .PARAMETER Undo
     Revert: remove what was added and restore the backups.
 
+.PARAMETER CheckOnly
+    Check the source, assets, patch and map inputs without changing either checkout.
+
+.PARAMETER OpenDrive
+    Optional path to the exported OpenDRIVE file to install.
+
+.PARAMETER NavMesh
+    Optional path to the matching Recast navmesh to install.
+
 .EXAMPLE
     powershell -File tools\Integrate-CarlaIntoCitySample.ps1
     powershell -File tools\Integrate-CarlaIntoCitySample.ps1 -Undo
@@ -43,34 +52,68 @@ param(
     [string] $CitySample = $(if ($env:CITYSAMPLE_DIR) { $env:CITYSAMPLE_DIR }
                        else { Join-Path $env:USERPROFILE "Documents\Unreal Projects\CitySample" }),
     [string] $EnginePath = $(if ($env:CARLA_UE_DIR) { $env:CARLA_UE_DIR }
+                       elseif ($env:CARLA_UNREAL_ENGINE_PATH) { $env:CARLA_UNREAL_ENGINE_PATH }
                        else { "C:\carla-ue58\UnrealEngine5_carla" }),
+    [string] $OpenDrive,
+    [string] $NavMesh,
+    [switch] $CheckOnly,
     [switch] $Undo
 )
 
 $ErrorActionPreference = "Stop"
+$CitySample = (Resolve-Path -LiteralPath $CitySample).Path
 
 $PLUGINS = @("Carla", "CarlaTools", "CarlaExporter", "StreetMap")
 $MODULE  = "CarlaDeviceProfileSelector"
 $BAK     = ".pre-carla.bak"
+$releaseCommit = "3ea166118d2c3c094b13b15c5b7a66a9a279998d"
+$releaseEngine = "b76fce0e3bcbb400efe1fe38bc2d662b33e6d989"
+$releaseContent = "55228c1ccca1b698e5ad8c638c576d523bcdebb9"
 
 $uproject  = Join-Path $CitySample "CitySample.uproject"
 $engineIni = Join-Path $CitySample "Config\DefaultEngine.ini"
+$scalabilityIni = Join-Path $CitySample "Config\DefaultScalability.ini"
 $targetCs  = Join-Path $CitySample "Source\CitySampleEditor.Target.cs"
 $carlaUE   = Join-Path $CarlaRoot  "Unreal\CarlaUnreal"
+$srcContent = Join-Path $carlaUE "Content\Carla"
+$srcScalabilityIni = Join-Path $carlaUE "Config\DefaultScalability.ini"
+$scalabilityBegin = '; BEGIN CARLA scalability defaults'
+$scalabilityEnd = '; END CARLA scalability defaults'
 
 function Say  ([string]$m, [string]$c = "Gray") { Write-Host $m -ForegroundColor $c }
 function Ok   ([string]$m) { Write-Host "  OK   $m" -ForegroundColor Green }
 function Note ([string]$m) { Write-Host "  --   $m" -ForegroundColor DarkGray }
 
+function Get-GitHead([string]$path) {
+    $ErrorActionPreference = 'Continue'
+    $commit = & git -C $path rev-parse --verify HEAD 2>$null
+    if ($LASTEXITCODE -eq 0) { return $commit }
+}
+
+function Remove-ScalabilityDefaults([string]$content) {
+    $begin = [regex]::Escape($scalabilityBegin)
+    $end = [regex]::Escape($scalabilityEnd)
+    return [regex]::Replace($content, "(?ms)^$begin\r?\n.*?^$end\r?\n(?:\r?\n)?", '')
+}
+
 # Deleting a junction must use rmdir, not a recursive delete: a recursive
 # delete follows the link and would wipe the real content behind it.
 function Remove-Tree([string]$p) {
-    if (-not (Test-Path $p)) { return }
-    $item = Get-Item $p -Force
+    if (-not (Test-Path -LiteralPath $p)) { return }
+    $item = Get-Item -LiteralPath $p -Force
+    $projectRoot = (Resolve-Path -LiteralPath $CitySample).Path.TrimEnd('\') + '\'
+    if (-not $item.FullName.StartsWith($projectRoot, [StringComparison]::OrdinalIgnoreCase)) {
+        throw "path is outside the City Sample project: $($item.FullName)"
+    }
+    for ($parent = $item.Parent; $parent.FullName.StartsWith($projectRoot, [StringComparison]::OrdinalIgnoreCase); $parent = $parent.Parent) {
+        if ($parent.Attributes -band [System.IO.FileAttributes]::ReparsePoint) {
+            throw "refusing to remove $p through the linked directory $($parent.FullName)"
+        }
+    }
     if ($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) {
-        [System.IO.Directory]::Delete($p, $false)
+        [System.IO.Directory]::Delete($item.FullName, $false)
     } else {
-        [System.IO.Directory]::Delete($p, $true)
+        [System.IO.Directory]::Delete($item.FullName, $true)
     }
 }
 
@@ -109,6 +152,7 @@ function Restore([string]$path) {
 # Undo
 # ---------------------------------------------------------------------------
 if ($Undo) {
+    if ($CheckOnly) { throw "-CheckOnly and -Undo are mutually exclusive" }
     Say "`n=== reverting CARLA integration ===`n" "Cyan"
     foreach ($p in ($PLUGINS + "CarlaMassBridge")) {
         $t = Join-Path $CitySample "Plugins\$p"
@@ -130,6 +174,13 @@ if ($Undo) {
     Restore $engineIni
     Restore $targetCs
     Restore (Join-Path $CitySample "Config\DefaultGame.ini")
+    if (Test-Path "$scalabilityIni$BAK") {
+        Restore $scalabilityIni
+    } elseif (Test-Path $scalabilityIni) {
+        $current = [System.IO.File]::ReadAllText($scalabilityIni)
+        $remaining = Remove-ScalabilityDefaults $current
+        if ($remaining -ne $current) { [System.IO.File]::WriteAllText($scalabilityIni, $remaining) }
+    }
     Say "`nreverted.`n" "Cyan"
     exit 0
 }
@@ -140,8 +191,11 @@ if ($Undo) {
 Say "`n=== 1/10 checking inputs ===" "Cyan"
 $checks = @(
     @{ Path = $uproject;                                                    Label = "CitySample.uproject" },
+    @{ Path = $engineIni;                                                   Label = "City Sample engine config" },
+    @{ Path = $targetCs;                                                    Label = "City Sample editor target" },
     @{ Path = (Join-Path $carlaUE "Plugins\Carla");                         Label = "CARLA plugin" },
     @{ Path = (Join-Path $carlaUE "Content\Carla");                         Label = "carla-content" },
+    @{ Path = (Join-Path $carlaUE "Source\$MODULE");                         Label = "CARLA device profile module" },
     @{ Path = (Join-Path $EnginePath "Engine\Binaries\Win64\UnrealEditor.exe"); Label = "CARLA engine fork" }
 )
 foreach ($c in $checks) {
@@ -162,6 +216,111 @@ if ($sig.StartsWith("version https")) {
 }
 Ok "CarlaGameMode.uasset resolved"
 
+# Check the source and generated inputs before modifying the project or registry.
+$sourceHead = Get-GitHead $CarlaRoot
+if (-not $sourceHead) { throw "CARLA source must be a Git checkout: $CarlaRoot" }
+$isRelease = $sourceHead -eq $releaseCommit
+$patchName = if ($isRelease) { "carla-1.0-citysample.patch" } else { "carla-ue58-plugin-build-fixes.patch" }
+$patch = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot "..\patches\$patchName")).Path
+Ok "CARLA $sourceHead ($patchName)"
+
+if ($isRelease) {
+    $engineHead = Get-GitHead $EnginePath
+    if ($engineHead -ne $releaseEngine) {
+        throw "CARLA 1.0 needs the built engine at $releaseEngine. Found '$engineHead' at $EnginePath."
+    }
+    $contentHead = Get-GitHead $srcContent
+    if ($contentHead -ne $releaseContent) {
+        throw "CARLA 1.0 needs content at $releaseContent. Found '$contentHead' at $srcContent. Run tools/fetch-carla-content.sh."
+    }
+    if (-not (Test-Path -LiteralPath $srcScalabilityIni -PathType Leaf)) {
+        throw "missing CARLA scalability settings: $srcScalabilityIni"
+    }
+    Ok "CARLA 1.0 engine and content revisions"
+}
+
+$skipCreated = @()
+$eap = $ErrorActionPreference
+$ErrorActionPreference = 'Continue'
+try {
+    & git -C $CarlaRoot apply --reverse --check $patch 2>$null
+    $patchApplied = $LASTEXITCODE -eq 0
+    if (-not $patchApplied) {
+        # Git reset leaves patch-created files untracked. Skip a creation
+        # hunk only when Git confirms the file matches the patch.
+        $creates = [regex]::Matches((Get-Content -LiteralPath $patch -Raw), '(?m)^--- /dev/null\r?\n\+\+\+ b/([^\r\n]+)')
+        foreach ($creation in $creates) {
+            $rel = $creation.Groups[1].Value
+            if (-not (Test-Path -LiteralPath (Join-Path $CarlaRoot $rel) -PathType Leaf)) { continue }
+            & git -C $CarlaRoot apply --reverse --check "--include=$rel" $patch 2>$null
+            if ($LASTEXITCODE -eq 0) { $skipCreated += "--exclude=$rel" }
+        }
+        & git -C $CarlaRoot apply --check @skipCreated $patch
+        if ($LASTEXITCODE -ne 0) {
+            throw "Cannot apply $patchName at $sourceHead. Use CARLA tag 1.0 or the legacy revision de3f38e64."
+        }
+    }
+} finally {
+    $ErrorActionPreference = $eap
+}
+if ($patchApplied) { Ok "CARLA patch already applied" } else { Ok "CARLA patch applies cleanly" }
+
+$deployedXodr = Join-Path $CitySample "Saved\OpenDrive\Small_City_LVL.xodr"
+$deployedNav = Join-Path $CitySample "Content\Map\Nav\Small_City_LVL.bin"
+$xodrSrc = $OpenDrive
+if (-not $xodrSrc) {
+    foreach ($name in @("SmallCity-signals.xodr", "SmallCity.xodr")) {
+        $candidate = Join-Path $PSScriptRoot "..\$name"
+        if (Test-Path -LiteralPath $candidate -PathType Leaf) { $xodrSrc = $candidate; break }
+    }
+}
+$navSrc = $NavMesh
+if (-not $navSrc) {
+    $candidate = Join-Path $PSScriptRoot "..\SmallCity.bin"
+    if (Test-Path -LiteralPath $candidate -PathType Leaf) { $navSrc = $candidate }
+}
+
+$xodrCheck = $xodrSrc
+if (-not $xodrCheck -and (Test-Path -LiteralPath $deployedXodr -PathType Leaf)) { $xodrCheck = $deployedXodr }
+if ($xodrCheck) {
+    $xml = New-Object System.Xml.XmlDocument
+    $xml.Load((Resolve-Path -LiteralPath $xodrCheck).Path)
+    $ids = [System.Collections.Generic.HashSet[string]]::new()
+    foreach ($road in $xml.SelectNodes('/OpenDRIVE/road')) { $null = $ids.Add($road.GetAttribute('id')) }
+    if ($ids.Count -eq 0) { throw "No OpenDRIVE roads in $xodrCheck." }
+    $collisions = @($xml.SelectNodes('/OpenDRIVE/junction') | Where-Object { $ids.Contains($_.GetAttribute('id')) })
+    if ($collisions.Count -gt 0) {
+        throw "$xodrCheck contains $($collisions.Count) overlapping road and junction IDs. Regenerate the OpenDRIVE file."
+    }
+    Ok "OpenDRIVE road and junction IDs are disjoint"
+}
+if ($navSrc) {
+    $navBytes = (Get-Item -LiteralPath $navSrc).Length
+    if ($navBytes -le 64) { throw "The Recast mesh at $navSrc is empty. Rebuild it from the OpenDRIVE file." }
+}
+
+# UBT reads these files from each plugin. Generate them before copying.
+$defSrc = Join-Path $CarlaRoot "Build\Unreal"
+$defs = @("Includes.def", "Libraries.def", "Options.def", "Definitions.def")
+$missingDefs = @($defs | Where-Object { -not (Test-Path -LiteralPath (Join-Path $defSrc $_) -PathType Leaf) })
+if ($missingDefs -and -not $CheckOnly) {
+    & cmake --build (Join-Path $CarlaRoot "Build") --target carla-unreal-configure
+    if ($LASTEXITCODE -eq 0) {
+        $missingDefs = @($defs | Where-Object { -not (Test-Path -LiteralPath (Join-Path $defSrc $_) -PathType Leaf) })
+    }
+}
+if ($missingDefs) {
+    throw "Missing $($missingDefs -join ', ') in $defSrc. Run SetupWithBuildTools.bat."
+}
+Ok "generated CARLA build definitions"
+
+if ($CheckOnly) { exit 0 }
+if (-not $patchApplied) {
+    & git -C $CarlaRoot apply @skipCreated $patch
+    if ($LASTEXITCODE -ne 0) { throw "git apply failed after its own check passed: $patchName" }
+    Ok "applied $patchName"
+}
+
 # ---------------------------------------------------------------------------
 # 2. Register the engine fork so EngineAssociation resolves
 # ---------------------------------------------------------------------------
@@ -177,100 +336,6 @@ if ($already) {
     $engineId = "{" + [guid]::NewGuid().ToString().ToUpper() + "}"
     New-ItemProperty -Path $buildsKey -Name $engineId -Value $EnginePath -PropertyType String -Force | Out-Null
     Ok "registered $engineId"
-}
-
-# ---------------------------------------------------------------------------
-# 2b. Source fixes the plugin needs to compile at all
-# ---------------------------------------------------------------------------
-Say "`n=== 2b/10 patching the CARLA plugin source ===" "Cyan"
-# Three genuine compile errors on ue58-dev-carla @ de3f38e64 that UBT hits and
-# CARLA's own cmake build never does, because cmake builds LibCarla and the
-# Python API but not the Unreal plugin. See ISSUES-TO-FILE.md, issue 3.
-$patch = Join-Path $PSScriptRoot "..\patches\carla-ue58-plugin-build-fixes.patch"
-if (Test-Path $patch) {
-    $patch = (Resolve-Path $patch).Path
-    Push-Location $CarlaRoot
-    # In Windows PowerShell 5.1, redirecting a NATIVE command's stderr (2>$null
-    # or 2>&1) wraps each stderr line in a NativeCommandError ErrorRecord - and
-    # under $ErrorActionPreference='Stop' that record is TERMINATING. It kills
-    # the script on the redirection itself, before $LASTEXITCODE is ever read.
-    #
-    # That mattered here on every clean checkout: `git apply --reverse --check`
-    # is *expected* to fail when the patch is not applied yet, and it writes to
-    # stderr when it does. So the first run of this script died at step 2b with
-    # a NativeCommandError stack trace, having registered the engine and done
-    # nothing else. git's own stderr is useful; let it through.
-    $eap = $ErrorActionPreference
-    $ErrorActionPreference = 'Continue'
-    try {
-        # --reverse --check succeeds when the patch is already in the tree.
-        & git apply --reverse --check $patch
-        if ($LASTEXITCODE -eq 0) {
-            Note "already patched"
-        } else {
-            # The patch CREATES files as well as modifying them. A hand-undo
-            # with `git reset --hard` restores the tracked files but leaves the
-            # created ones behind, because reset does not touch untracked files.
-            # Both checks then fail forever: reverse-check because the tracked
-            # files are pristine again, forward-check because the created file
-            # "already exists in working directory". The script used to throw
-            # "the CARLA source has moved on; re-derive it", sending the user to
-            # regenerate a patch that was perfectly fine.
-            #
-            # --3way does NOT rescue this: for a creation hunk it looks the path
-            # up in the index, finds it untracked, and bails the same way. So
-            # remove the patch's own leftovers first - only ones git agrees are
-            # untracked, so a real source file is never deleted.
-            & git apply --check $patch
-            if ($LASTEXITCODE -ne 0) {
-                $created = @()
-                foreach ($line in (Get-Content $patch)) {
-                    if ($line -match '^\+\+\+ b/(.+)$') { $created += $Matches[1] }
-                }
-                $cleaned = @()
-                foreach ($rel in ($created | Select-Object -Unique)) {
-                    if ([string]::IsNullOrWhiteSpace($rel)) { continue }
-                    if ($rel -eq "/dev/null") { continue }
-                    $full = Join-Path $CarlaRoot $rel
-                    if (-not (Test-Path $full -PathType Leaf)) { continue }
-                    # Never delete outside the CARLA tree, whatever the patch says.
-                    $resolved = (Resolve-Path $full).Path
-                    $rootFull = (Resolve-Path $CarlaRoot).Path.TrimEnd('\') + '\'
-                    if (-not $resolved.StartsWith($rootFull, [StringComparison]::OrdinalIgnoreCase)) { continue }
-                    & git ls-files --error-unmatch -- $rel 2>&1 | Out-Null
-                    if ($LASTEXITCODE -ne 0) {      # untracked => the patch made it
-                        Remove-Item -LiteralPath $resolved -Force
-                        $cleaned += $rel
-                    }
-                }
-                if ($cleaned.Count) {
-                    Note "removed $($cleaned.Count) leftover file(s) from a previous apply"
-                    & git apply --check $patch
-                }
-            }
-            if ($LASTEXITCODE -ne 0) {
-                # Do NOT fall back to --3way. It is not atomic: it applies what
-                # it can, writes conflict markers into what it cannot, stages
-                # the lot, and returns non-zero - so the user is left with a
-                # half-patched CARLA tree and a conflicted index, which is far
-                # worse than not applying at all. Plain `git apply` is
-                # all-or-nothing, so failing the check means nothing was touched.
-                throw ("cannot apply $patch to $CarlaRoot - see git's output above. " +
-                       "Nothing was changed. Most often this is a CARLA checkout " +
-                       "at a different commit: this patch is against " +
-                       "ue58-dev-carla @ de3f38e64. Check with " +
-                       "``git -C $CarlaRoot rev-parse --short HEAD``.")
-            }
-            & git apply $patch
-            if ($LASTEXITCODE -ne 0) { throw "git apply failed after its own --check passed - see above" }
-            Ok "applied carla-ue58-plugin-build-fixes.patch"
-        }
-    } finally {
-        $ErrorActionPreference = $eap
-        Pop-Location
-    }
-} else {
-    Note "no patch file - assuming the plugin already compiles"
 }
 
 # ---------------------------------------------------------------------------
@@ -320,35 +385,6 @@ if (Test-Path $bridgeSrc) {
     Note "plugins\CarlaMassBridge not found - no Mass bridge, no FastGeo tagger"
 }
 
-# The Carla and CarlaTools build rules read four .def files from their plugin
-# root - the include paths, libraries, preprocessor definitions and options
-# that CARLA's cmake build resolved. They are generated and .gitignore'd, and
-# only the "carla-unreal-configure" cmake target writes them, which a plain
-# "cmake --build Build" does not run. Without them UBT fails immediately with
-#   Unable to instantiate module 'Carla': Could not find file '...Definitions.def'
-# The paths inside are absolute, so they are valid from any project.
-$defSrc = Join-Path $CarlaRoot "Build\Unreal"
-$defs   = @("Includes.def", "Libraries.def", "Options.def", "Definitions.def")
-if (-not (Test-Path (Join-Path $defSrc "Definitions.def"))) {
-    Note "generating .def files (cmake target carla-unreal-configure)"
-    Push-Location $CarlaRoot
-    # Same native-stderr trap as the git calls above: `2>&1 | Out-Null` under
-    # EAP=Stop turns cmake's ordinary warning output into a terminating error,
-    # so the script died here instead of reaching the far more helpful throw
-    # below - and this branch runs exactly when the .def files are missing,
-    # which is the normal state on a fresh checkout.
-    $eap = $ErrorActionPreference
-    $ErrorActionPreference = 'Continue'
-    try {
-        & cmake --build Build --target carla-unreal-configure
-        if ($LASTEXITCODE -ne 0) {
-            Note "cmake exited $LASTEXITCODE - see its output above"
-        }
-    } finally {
-        $ErrorActionPreference = $eap
-        Pop-Location
-    }
-}
 foreach ($p in @("Carla", "CarlaTools")) {
     $dst = Join-Path $CitySample "Plugins\$p"
     if (-not (Test-Path $dst)) { continue }
@@ -365,7 +401,6 @@ foreach ($p in @("Carla", "CarlaTools")) {
 #    git-lfs control in one place.
 # ---------------------------------------------------------------------------
 Say "`n=== 4/10 linking CARLA content ===" "Cyan"
-$srcContent = Join-Path $carlaUE "Content\Carla"
 $dstContent = Join-Path $CitySample "Content\Carla"
 Remove-Tree $dstContent
 New-Item -ItemType Junction -Path $dstContent -Target $srcContent | Out-Null
@@ -500,6 +535,20 @@ if (($lines -join "`n") -notmatch 'Name="SensorTrace"') {
     }
 } else { Note "collision channels already present" }
 
+if (($lines -join "`n") -notmatch 'Name="CustomSensorCollision"') {
+    $channelSection = ($lines | Select-String -Pattern '^\[/Script/Engine\.CollisionProfile\]' | Select-Object -First 1).LineNumber
+    if ($channelSection) {
+        $ignoredChannels = @("WorldStatic", "WorldDynamic", "Pawn", "Visibility", "Camera",
+                             "PhysicsBody", "Vehicle", "Destructible", "Ballistic", "BallisticLandingTarget",
+                             "Interactions", "Footstep", "VehicleComponent", "VehicleFrame", "VehicleWheels")
+        $responses = @($ignoredChannels | ForEach-Object { '(Channel="{0}",Response=ECR_Ignore)' -f $_ })
+        $responses += '(Channel="SensorObject",Response=ECR_Block)', '(Channel="SensorTrace",Response=ECR_Block)'
+        $profile = '+Profiles=(Name="CustomSensorCollision",CollisionEnabled=QueryOnly,bCanModify=True,ObjectTypeName="SensorObject",CustomResponses=({0}),HelpMessage="Collision geometry for CARLA ray cast sensors")' -f ($responses -join ',')
+        $lines = Insert-After $lines ($channelSection - 1) @($profile)
+        Ok "CustomSensorCollision profile"
+    }
+}
+
 # --- segmentation render pass --------------------------------------------
 # The engine fork declares r.CARLA.EnableSegmentationRendering with a default
 # of 0 and gates the segmentation pass on it. At 0 the pass never draws, but
@@ -518,6 +567,21 @@ if (($lines -join "`n") -notmatch 'r\.CARLA\.EnableSegmentationRendering') {
 } else { Note "segmentation CVar already present" }
 
 Set-Content $engineIni -Value $lines -Encoding UTF8
+
+$currentScalability = if (Test-Path -LiteralPath $scalabilityIni) {
+    [System.IO.File]::ReadAllText($scalabilityIni)
+} else { "" }
+$projectScalability = Remove-ScalabilityDefaults $currentScalability
+if ($isRelease) {
+    Backup $scalabilityIni
+    $carlaScalability = (Get-Content -LiteralPath $srcScalabilityIni -Raw).TrimEnd()
+    # City Sample settings follow the CARLA defaults and take precedence.
+    $projectScalability = @($scalabilityBegin, $carlaScalability, $scalabilityEnd, "", $projectScalability) -join [Environment]::NewLine
+}
+if ($projectScalability -ne $currentScalability) {
+    [System.IO.File]::WriteAllText($scalabilityIni, $projectScalability)
+    Ok "updated CARLA defaults in Config\DefaultScalability.ini"
+}
 
 # ---------------------------------------------------------------------------
 # 8. The road network CARLA drives on
@@ -564,21 +628,17 @@ Say "`n=== 8/10 installing the extracted road network ===" "Cyan"
 # the traffic lights into that file and leaves the raw export alone, so
 # installing the raw one silently turns every traffic light back off - the
 # lights are only in the .xodr, nowhere else.
-$xodrSrc = $null
-foreach ($cand in @("..\SmallCity-signals.xodr", "..\SmallCity.xodr")) {
-    $p = Join-Path $PSScriptRoot $cand
-    if (Test-Path $p) { $xodrSrc = $p; break }
-}
 if ($xodrSrc) {
-    $savedDir = Join-Path $CitySample "Saved\OpenDrive"
+    $savedDir = Split-Path $deployedXodr -Parent
     if (-not (Test-Path $savedDir)) { New-Item -ItemType Directory -Path $savedDir -Force | Out-Null }
-    Copy-Item (Resolve-Path $xodrSrc).Path (Join-Path $savedDir "Small_City_LVL.xodr") -Force
-    $nSignals = ([regex]::Matches((Get-Content $xodrSrc -Raw), '<signal ')).Count
+    $xodrSrc = (Resolve-Path -LiteralPath $xodrSrc).Path
+    if ($xodrSrc -ne $deployedXodr) { Copy-Item -LiteralPath $xodrSrc -Destination $deployedXodr -Force }
+    $nSignals = $xml.SelectNodes('/OpenDRIVE/road/signals/signal').Count
     Ok "Saved\OpenDrive\Small_City_LVL.xodr  ($(Split-Path $xodrSrc -Leaf), $nSignals signals)"
     if ($nSignals -eq 0) {
         Note "no traffic lights in that file - see README part B step 8 to add them"
     }
-} else {
+} elseif (-not $xodrCheck) {
     Note "SmallCity.xodr not found - run the export pipeline first (see README part A)"
 }
 
@@ -588,19 +648,13 @@ Say "`n=== 9/10 installing the pedestrian navmesh ===" "Cyan"
 # and that RPC only searches Saved/ for generated OpenDRIVE worlds; for a map
 # that already exists it walks the map's CONTENT folder and nothing else. A .bin
 # in Saved\Nav\ is ignored without a word in any log, on either side.
-$navSrc = Join-Path $PSScriptRoot "..\SmallCity.bin"
-if (Test-Path $navSrc) {
-    $navDir = Join-Path $CitySample "Content\Map\Nav"
+if ($navSrc) {
+    $navDir = Split-Path $deployedNav -Parent
     if (-not (Test-Path $navDir)) { New-Item -ItemType Directory -Path $navDir -Force | Out-Null }
-    Copy-Item (Resolve-Path $navSrc).Path (Join-Path $navDir "Small_City_LVL.bin") -Force
-    $navBytes = (Get-Item $navSrc).Length
+    $navSrc = (Resolve-Path -LiteralPath $navSrc).Path
+    if ($navSrc -ne $deployedNav) { Copy-Item -LiteralPath $navSrc -Destination $deployedNav -Force }
     Ok "Content\Map\Nav\Small_City_LVL.bin  ($('{0:N0}' -f $navBytes) bytes)"
-    # 40 bytes is a NavMeshSetHeader with zero tiles: RecastBuilder ran and
-    # found no walkable surface. It loads without error and navigates nothing.
-    if ($navBytes -le 64) {
-        Note "that navmesh is empty (no tiles) - rebuild it, see README part B step 11"
-    }
-} else {
+} elseif (-not (Test-Path -LiteralPath $deployedNav -PathType Leaf)) {
     Note "SmallCity.bin not found - walkers will not move; see README part B step 11"
 }
 

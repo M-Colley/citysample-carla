@@ -1,29 +1,15 @@
 #!/usr/bin/env bash
 # Fetch carla-content without the World Partition actor files.
 #
-# The repo tracks 513,074 LFS files; 468,594 of them (91%) live under
-# __ExternalActors__/ and __ExternalObjects__/ - per-actor World Partition data
-# for CARLA's OWN towns. We are loading the City Sample map instead, so none of
-# it is needed. Excluding it leaves 44,383 files / 46 GB:
-#
-#     Static          42,563 files   33.35 GB   meshes, textures, vehicles
-#     Maps               853 files   10.63 GB   CARLA's own towns
-#     HDMaps               8 files    1.51 GB
-#     HoudiniEngine      169 files    0.37 GB
-#     Blueprints         682 files    0.07 GB   CarlaGameMode, vehicles, sensors
-#     Animations          72 files    0.04 GB
-#
-# Only Blueprints and Static are strictly needed to run the City Sample as a
-# CARLA server; Maps/HDMaps are kept so CARLA's own towns still work, which
-# makes it possible to A/B the two. Add them to the exclusions below to save
-# 12 GB if you never want them.
+# The 1.0 tag has 45,019 LFS files (49.66 GB) after excluding CARLA's own
+# World Partition actors and objects. The LFS cache stores another 49.61 GB
+# when it is empty. LFS_CACHE can point to a separate drive.
 #
 # Two separate exclusions are required and they are NOT the same thing:
 #   sparse-checkout    stops git writing those paths to the working tree
 #   lfs.fetchexclude   stops git-lfs DOWNLOADING them in the first place
-# Without the second, lfs still pulls all 513k objects and fills the disk.
-set -u
-set -e
+# Both exclusions are needed to omit the unused assets from the download.
+set -euo pipefail
 trap 'echo "FAILED at line $LINENO" >&2' ERR
 
 # Everything is overridable from the environment so this is not tied to one
@@ -35,25 +21,70 @@ trap 'echo "FAILED at line $LINENO" >&2' ERR
 # every object it downloads, so point it at a roomy volume.
 # CARLA_DIR is what the PowerShell scripts and the README use; accept both so
 # one exported variable covers the whole pipeline.
-CARLA_ROOT="${CARLA_ROOT:-${CARLA_DIR:-/c/carla-ue58/carla}}"
+CARLA_ROOT=$(cd "${CARLA_ROOT:-${CARLA_DIR:-/c/carla-ue58/carla}}" && pwd -P)
 DEST="${DEST:-$CARLA_ROOT/Unreal/CarlaUnreal/Content/Carla}"
 URL="${CONTENT_URL:-https://bitbucket.org/carla-simulator/carla-content.git}"
-BRANCH="${CONTENT_BRANCH:-ue58-dev-carla}"
 CACHE="${LFS_CACHE:-$CARLA_ROOT/.lfs-cache}"
 EXCLUDE="__ExternalActors__/**,__ExternalObjects__/**"
+CARLA_1_0_REV=3ea166118d2c3c094b13b15c5b7a66a9a279998d
+CONTENT_1_0_REV=55228c1ccca1b698e5ad8c638c576d523bcdebb9
+
+case "${1:-}" in
+  ''|--check) ;;
+  *) echo "usage: $0 [--check]" >&2; exit 2 ;;
+esac
+
+source_rev=$(git -C "$CARLA_ROOT" rev-parse --verify HEAD)
+branch="${CONTENT_BRANCH:-ue58-dev-carla}"
+checkout="$branch"
+if [[ "$source_rev" == "$CARLA_1_0_REV" ]]; then
+  branch=1.0
+  checkout="$CONTENT_1_0_REV"
+fi
+
+check_release_revision() {
+  if [[ "$source_rev" != "$CARLA_1_0_REV" ]]; then
+    return
+  fi
+  local current
+  if [[ ! -e "$DEST/.git" ]] || ! current=$(git -C "$DEST" rev-parse --verify HEAD); then
+    echo "CARLA 1.0 content checkout missing at $DEST. Run $0." >&2
+    exit 1
+  fi
+  if [[ "$current" != "$CONTENT_1_0_REV" ]]; then
+    echo "CARLA 1.0 needs content $CONTENT_1_0_REV. Found $current at $DEST." >&2
+    echo "Use a separate CARLA checkout or move the existing content aside before fetching." >&2
+    exit 1
+  fi
+}
+
+check_game_mode() {
+  local game_mode="$DEST/Blueprints/Game/CarlaGameMode.uasset"
+  if [[ ! -s "$game_mode" ]] || LC_ALL=C grep -aq '^version https://git-lfs.github.com/spec/v1$' "$game_mode"; then
+    echo "CARLA game mode asset missing or unresolved at $game_mode. Run $0." >&2
+    exit 1
+  fi
+}
+
+if [[ "${1:-}" == '--check' ]]; then
+  check_release_revision
+  check_game_mode
+  exit 0
+fi
 
 mkdir -p "$(dirname "$DEST")"
 
-if [ ! -d "$DEST/.git" ]; then
+if [[ ! -e "$DEST/.git" ]]; then
   echo "=== 1/4 clone (metadata only, LFS deferred) ==="
-  # SKIP_SMUDGE: check out LFS pointer files, download nothing yet.
-  GIT_LFS_SKIP_SMUDGE=1 git clone --depth 1 --no-checkout --sparse \
-      -b "$BRANCH" "$URL" "$DEST" || exit 1
+  GIT_LFS_SKIP_SMUDGE=1 git clone --depth 1 --no-checkout \
+      -b "$branch" "$URL" "$DEST"
 else
   echo "=== 1/4 clone: already present, reusing ==="
 fi
+check_release_revision
 
-cd "$DEST" || exit 1
+DEST=$(cd "$DEST" && pwd -P)
+cd "$DEST"
 
 echo "=== 2/4 config ==="
 git config lfs.storage            "$CACHE"
@@ -64,25 +95,16 @@ echo "  lfs.storage      = $(git config lfs.storage)"
 echo "  lfs.fetchexclude = $(git config lfs.fetchexclude)"
 
 echo "=== 3/4 sparse checkout ==="
-# Write the pattern file directly instead of "git sparse-checkout set".
-# Under Git Bash / MSYS, any argument that looks like an absolute POSIX path is
-# rewritten to a Windows one, so '!/__ExternalActors__/' silently becomes
-# '!C:/Program Files/Git/__ExternalActors__/' and excludes nothing. Writing the
-# file is immune to that.
-git sparse-checkout init --no-cone || exit 1
-cat > .git/info/sparse-checkout <<'EOP'
+# Read patterns on stdin so Git Bash passes the leading slashes literally.
+GIT_LFS_SKIP_SMUDGE=1 git sparse-checkout set --no-cone --stdin <<'EOP'
 /*
 !/__ExternalActors__/
 !/__ExternalObjects__/
 EOP
-echo "  patterns:"; sed 's/^/    /' .git/info/sparse-checkout
-git sparse-checkout reapply || exit 1
-GIT_LFS_SKIP_SMUDGE=1 git checkout "$BRANCH" || exit 1
-echo "  pointer files on disk: $(find . -type f -not -path './.git/*' | wc -l)"
+GIT_LFS_SKIP_SMUDGE=1 git checkout "$checkout"
 
 echo "=== 4/4 lfs pull ==="
-git lfs pull || exit 1
+git lfs pull
+check_game_mode
 
-echo
-echo "DONE  files: $(find . -type f -not -path './.git/*' | wc -l)"
-du -sh . 2>/dev/null | tail -1
+echo "CARLA content ready at $DEST."

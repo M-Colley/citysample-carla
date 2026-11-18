@@ -26,6 +26,8 @@ There are two halves, and you can stop after the first:
 
 Background: [carla#9852](https://github.com/carla-simulator/carla/issues/9852).
 
+**CARLA 1.0 status.** The exported road network, signal phases, and pedestrian mesh passed runtime checks on the official Windows package. The repository includes a patch for the full City Sample integration. The full server measurements below use the legacy revision. Its 1.0 build and runtime checks are pending.
+
 > ### ⚠ Read this before collecting any data
 >
 > **Working** — cameras, depth, GNSS, IMU, collision sensors, vehicle control,
@@ -74,7 +76,7 @@ Background: [carla#9852](https://github.com/carla-simulator/carla/issues/9852).
 | **Visual Studio 2022** with the **C++ x64 toolset** and the **.NET Framework 4.8 SDK** | ● | ● |
 | **Python 3.10+** | ● | ● |
 | **CARLA** (`pip install carla`) — for testing the `.xodr` only | ● | |
-| **CARLA built from source**, `ue58-dev-carla` @ `de3f38e64`, against the **CARLA fork of UE 5.8** | | ● |
+| **CARLA built from source** with the matching **CARLA fork of UE 5.8** (revisions in §3) | | ● |
 | An **Epic-linked GitHub account** (`CarlaUnreal/UnrealEngine` is private) | | ● |
 | ~**385 GB** free disk, ~**64 GB** RAM | | ● |
 
@@ -148,7 +150,9 @@ reports whether the vehicles actually route.
 
 ## 3. Part B — run the City Sample as a CARLA server
 
-You need CARLA source and its UE 5.8 engine fork built. Then, in order:
+Use CARLA source tag `1.0` (`3ea166118d2c`), engine fork tag `1.0` (`b76fce0e3bcb`), and content tag `1.0` (`55228c1ccca1`). Build the engine using the upstream Windows instructions. The guide estimates 225 GB for the engine alone. [CARLA source](https://github.com/carla-simulator/carla/releases/tag/1.0) · [Windows build instructions](https://github.com/carla-simulator/carla/blob/1.0/Docs/build_windows_ue5.md) · [Content revision](https://bitbucket.org/carla-simulator/carla-content/commits/55228c1ccca1b698e5ad8c638c576d523bcdebb9)
+
+The legacy `ue58-dev-carla` revision `de3f38e64` still uses the historical patch and matching 0.10.0 Python client.
 
 > **Tell the scripts where your things are, first.** The PowerShell scripts and
 > `fetch-carla-content.sh` all default to the layout this was developed on. Set
@@ -179,10 +183,7 @@ bash tools/fetch-carla-content.sh
 Run it from Git Bash (it is a shell script, and it uses `git`, `awk` and `sed`).
 It works on `$CARLA_DIR` if set, otherwise `C:\carla-ue58\carla`.
 
-`carla-content` tracks **513,074** git-lfs files. 468,594 of them are
-`__ExternalActors__/` — World Partition data for CARLA's *own* towns, which you
-are not loading. The script sparse-checks-out the **44,383 files / 46 GB** that
-matter. A full clone runs at ~67 GB/hr and will fill your disk.
+For CARLA 1.0, the helper checks out the release content revision and excludes the root World Partition actor and object folders. The remaining 45,019 LFS files use 46.25 GiB in the working tree. The LFS cache can use another 46.20 GiB. Set `LFS_CACHE` to put the cache on another volume. Use a fresh CARLA source directory for 1.0 if you already have legacy CARLA content.
 
 ### Step 2 — build CARLA's C++
 
@@ -199,13 +200,7 @@ It picks up `CARLA_DIR` if you set it (same variable as everything else) and
 otherwise assumes `C:\carla-ue58\carla`. `VCVARS` at the top of the file
 assumes VS 2022 **Build Tools**; edit that line if you have the full IDE.
 
-It also requires `CARLA_UNREAL_ENGINE_PATH` to point at your **built** CARLA
-UE 5.8 fork, and exits immediately if it is unset or contains no
-`UnrealEditor.exe`:
-
-```bash
-set CARLA_UNREAL_ENGINE_PATH=C:\carla-ue58\UnrealEngine5_carla
-```
+The script uses `CARLA_UNREAL_ENGINE_PATH` or `CARLA_UE_DIR` for the built engine. For CARLA 1.0, install the matching wheel from `Build/PythonAPI/dist` in the Python environment used for validation. The 1.0 build defaults to `DLSS_SDK=disabled`. Set `DLSS_SDK` to an installed SDK path to include that feature.
 
 ### Step 3 — merge CARLA into the City Sample project
 
@@ -213,20 +208,9 @@ set CARLA_UNREAL_ENGINE_PATH=C:\carla-ue58\UnrealEngine5_carla
 powershell -File tools\Integrate-CarlaIntoCitySample.ps1
 ```
 
-This moves CARLA *into* the City Sample project rather than the reverse — City
-Sample is 83 GB and Unreal asset references are absolute (`/Game/...`), so
-moving the small side means nothing has to be re-pathed. It copies the four
-CARLA plugins, junctions in the 46 GB of CARLA content, patches the `.uproject`
-and `DefaultEngine.ini`, applies `patches/carla-ue58-plugin-build-fixes.patch`,
-and drops your extracted `SmallCity.xodr` into `Saved/OpenDrive/`.
+Close Unreal Editor before integration. The script selects the source patch, copies the plugins, links the CARLA assets, and updates the project configuration. `-CheckOnly` checks the revisions, patch, build inputs, and supplied road files without changing either checkout. Supply `-OpenDrive` and `-NavMesh` to use exports outside the repository. The preflight rejects OpenDRIVE files with overlapping road and junction IDs.
 
-Everything it edits is backed up as `*.pre-carla.bak`, and `-Undo` restores
-those, removes what it copied, and deletes the installed `.xodr` and navmesh.
-It does **not** reverse two things: the git patch applied to your CARLA source
-tree, and the HKCU engine registration. Undo those by hand if you need a clean
-slate — and note that `git reset --hard` in the CARLA checkout leaves the one
-file the patch *creates* (`Carla/Util/CarlaTraceChannels.h`) behind; delete it
-too, or the next integrate has to fall back to a 3-way apply.
+Original project settings are backed up as `*.pre-carla.bak`. `-Undo` restores those settings and removes the copied plugins, asset link, and deployed road and navmesh files. The source patch and engine registration can be reversed separately.
 
 ### Step 4 — build
 

@@ -177,7 +177,7 @@ def check_windows(part_a: bool = False) -> None:
                    "no Visual Studio with the C++ x64 toolset component")
 
     # The CARLA UE fork is gated: you must link GitHub <-> Epic Games.
-    ue = os.environ.get("CARLA_UNREAL_ENGINE_PATH")
+    ue = os.environ.get("CARLA_UE_DIR") or os.environ.get("CARLA_UNREAL_ENGINE_PATH")
     if part_a:
         pass                                # part A uses the launcher's UE 5.8
     elif ue and os.path.isdir(ue):
@@ -192,14 +192,13 @@ def check_windows(part_a: bool = False) -> None:
 
     # The Python client the tools use.
     try:
-        import carla  # noqa: F401
-        record(OK, "carla python module", getattr(carla, "__version__", "unknown"))
+        import carla
+        record(OK, "carla python module", carla.Client("127.0.0.1", 2000).get_client_version())
     except ImportError:
         record(
             WARN, "carla python module",
-            "not importable. Part A can use any released client (pip install carla); "
-            "part B needs the 0.10.0 wheel built from your own tree, at "
-            "Build/PythonAPI/dist/carla-0.10.0-*.whl",
+            "not importable. Use the wheel matching the server. The source build "
+            "writes it to Build/PythonAPI/dist.",
         )
 
 
@@ -211,7 +210,7 @@ def main() -> int:
 
     scope = "  [part A only]" if args.part_a else ""
     print()
-    print("  doctor - Epic City Sample as a CARLA 0.10.0 (UE 5.8) server" + scope)
+    print("  doctor - Epic City Sample as a CARLA (UE 5.8) server" + scope)
     print(f"  {platform.system()} {platform.release()}  python {platform.python_version()}\n")
 
     if platform.system() != "Windows":
