@@ -138,9 +138,10 @@ class RouteDriver:
     network, so if the car drives, the OpenDRIVE is right.
     """
 
-    def __init__(self, vehicle, carla_map, step=2.0, lookahead=6.0, target_kmh=28.0):
+    def __init__(self, vehicle, carla_map, world=None, step=2.0, lookahead=6.0, target_kmh=28.0):
         self.v = vehicle
         self.map = carla_map
+        self.world = world
         self.step = step
         self.lookahead = lookahead
         self.target = target_kmh
@@ -191,8 +192,33 @@ class RouteDriver:
         kmh = 3.6 * math.sqrt(vel.x ** 2 + vel.y ** 2 + vel.z ** 2)
         # Ease off in corners, or it understeers wide at every junction.
         want = self.target * (1.0 - 0.55 * min(1.0, abs(steer)))
-        throttle = 0.0 if kmh > want else min(0.75, 0.25 + (want - kmh) * 0.05)
-        brake = 0.35 if kmh > want + 6.0 else 0.0
+
+        # Yield to vehicles ahead in our lane (including Mass proxies when the
+        # Mass bridge is enabled) and to red traffic lights.
+        right_x, right_y = -fwd.y, fwd.x
+        gap = 999.0
+        if self.world is not None:
+            for other in self.world.get_actors().filter("vehicle.*"):
+                if other.id == self.v.id:
+                    continue
+                oloc = other.get_location()
+                ox, oy, oz = oloc.x - loc.x, oloc.y - loc.y, oloc.z - loc.z
+                if abs(oz) > 3.0:
+                    continue
+                ahead = ox * fwd.x + oy * fwd.y
+                lateral = abs(ox * right_x + oy * right_y)
+                if 1.5 < ahead < gap and lateral < 2.2:
+                    gap = ahead
+        if gap < 8.5 or ego_light_state(self.v) == "Red":
+            want = 0.0
+        elif gap < 16.0:
+            want = min(want, self.target * (gap - 8.5) / 7.5)
+
+        if want <= 0.1:
+            throttle, brake = 0.0, 0.65
+        else:
+            throttle = 0.0 if kmh > want else min(0.75, 0.25 + (want - kmh) * 0.05)
+            brake = 0.35 if kmh > want + 6.0 else 0.0
         self.v.apply_control(carla.VehicleControl(
             throttle=throttle, steer=steer, brake=brake))
 
@@ -233,6 +259,8 @@ def main() -> int:
                     help="leave the weather alone; by default CARLA's own sun "
                          "is put below the horizon so it does not double up "
                          "with the one City Sample already has")
+    ap.add_argument("--seed", type=int, default=7,
+                    help="PRNG seed for choosing the ego spawn point (default 7)")
     ap.add_argument("--gif", action="store_true",
                     help="also write a smaller .gif next to the .mp4")
     args = ap.parse_args()
@@ -251,9 +279,12 @@ def main() -> int:
 
     client = carla.Client(args.host, args.port)
     client.set_timeout(args.timeout)
+    server_version = client.get_server_version()
     world = client.get_world()
     bl = world.get_blueprint_library()
-    tm = client.get_trafficmanager()
+    # Do not start the Traffic Manager when --vehicles 0: with the Mass bridge
+    # enabled, ALSM would adopt every dormant vehicle.mass.* proxy.
+    tm = client.get_trafficmanager() if args.vehicles > 0 else None
 
     original = world.get_settings()
     ego = encoder = ffmpeg_log = None
@@ -281,7 +312,7 @@ def main() -> int:
         # bl.filter("vehicle.*")[0] is a Sprinter van, which fills two thirds
         # of a chase camera. Prefer something low.
         import random
-        random.seed(7)          # same shot every time, for A/B comparisons
+        random.seed(args.seed)  # same shot every time, for A/B comparisons
         ego_bp = None
         for want in ("vehicle.tesla.model3", "vehicle.audi.a2", "vehicle.nissan.micra",
                      "vehicle.bmw.grandtourer", "vehicle.dodge.charger"):
@@ -347,9 +378,10 @@ def main() -> int:
         settings.synchronous_mode = True
         settings.fixed_delta_seconds = 1.0 / args.fps
         world.apply_settings(settings)
-        tm.set_synchronous_mode(True)
+        if tm is not None:
+            tm.set_synchronous_mode(True)
 
-        driver = RouteDriver(ego, world.get_map(), target_kmh=args.kmh)
+        driver = RouteDriver(ego, world.get_map(), world=world, target_kmh=args.kmh)
         for v in vehicles:
             v.set_autopilot(True, tm.get_port())
         for c in controllers:
@@ -499,7 +531,7 @@ def main() -> int:
             # Epic's traffic AND crowd are both mirrored in, so these track the
             # city; with it off they count only what this script spawned.
             d.text((10, y),
-                   f"Epic City Sample  served by CARLA 0.10   "
+                   f"Epic City Sample  served by CARLA {server_version}   "
                    f"{kmh:5.1f} km/h   "
                    f"get_actors() within 80 m: {near_v:3d} vehicles, "
                    f"{near_w:3d} walkers   frame {n + 1}/{total}",
@@ -581,7 +613,8 @@ def main() -> int:
             except RuntimeError:
                 pass
         try:
-            tm.set_synchronous_mode(False)
+            if tm is not None:
+                tm.set_synchronous_mode(False)
         except RuntimeError:
             pass
         try:

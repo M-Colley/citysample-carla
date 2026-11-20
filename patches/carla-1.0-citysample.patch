@@ -1397,7 +1397,7 @@ index 0000000..d9751a0
 +  }
 +}
 diff --git a/Unreal/CarlaUnreal/Plugins/Carla/Source/Carla/Util/RayTracer.cpp b/Unreal/CarlaUnreal/Plugins/Carla/Source/Carla/Util/RayTracer.cpp
-index 29459c7..287ba98 100644
+index 29459c7..e8e6d28 100644
 --- a/Unreal/CarlaUnreal/Plugins/Carla/Source/Carla/Util/RayTracer.cpp
 +++ b/Unreal/CarlaUnreal/Plugins/Carla/Source/Carla/Util/RayTracer.cpp
 @@ -8,6 +8,7 @@
@@ -1408,7 +1408,7 @@ index 29459c7..287ba98 100644
  
  
  namespace crp = carla::rpc;
-@@ -20,7 +21,7 @@ std::vector<crp::LabelledPoint> URayTracer::CastRay(
+@@ -20,16 +21,14 @@ std::vector<crp::LabelledPoint> URayTracer::CastRay(
        OutHits,
        StartLocation,
        EndLocation,
@@ -1417,7 +1417,17 @@ index 29459c7..287ba98 100644
        FCollisionQueryParams(),
        FCollisionResponseParams()
    );
-@@ -51,7 +52,7 @@ std::pair<bool, crp::LabelledPoint> URayTracer::ProjectPoint(
+   std::vector<crp::LabelledPoint> result;
+   for (auto& Hit : OutHits)
+   {
+-    UPrimitiveComponent* Component = Hit.GetComponent();
+-    crp::CityObjectLabel ComponentTag =
+-        ATagger::GetTagOfTaggedComponent(*Component);
++    const auto ComponentTag = ATagger::GetTagOfHit(Hit);
+ 
+     FVector UELocation = Hit.Location;
+     ACarlaGameModeBase* GameMode = UCarlaStatics::GetGameMode(World);
+@@ -51,15 +50,13 @@ std::pair<bool, crp::LabelledPoint> URayTracer::ProjectPoint(
        Hit,
        StartLocation,
        StartLocation + Direction.GetSafeNormal() * MaxDistance,
@@ -1426,6 +1436,15 @@ index 29459c7..287ba98 100644
        FCollisionQueryParams(),
        FCollisionResponseParams()
    );
+   if (bDidHit)
+   {
+-    UPrimitiveComponent* Component = Hit.GetComponent();
+-    crp::CityObjectLabel ComponentTag =
+-        ATagger::GetTagOfTaggedComponent(*Component);
++    const auto ComponentTag = ATagger::GetTagOfHit(Hit);
+ 
+     FVector UELocation = Hit.Location;
+     ACarlaGameModeBase* GameMode = UCarlaStatics::GetGameMode(World);
 diff --git a/Unreal/CarlaUnreal/Plugins/Carla/Source/Carla/Vehicle/MovementComponents/ChronoMovementComponent.cpp b/Unreal/CarlaUnreal/Plugins/Carla/Source/Carla/Vehicle/MovementComponents/ChronoMovementComponent.cpp
 index d5e9a8d..dc0bc2f 100644
 --- a/Unreal/CarlaUnreal/Plugins/Carla/Source/Carla/Vehicle/MovementComponents/ChronoMovementComponent.cpp

@@ -21,12 +21,21 @@ There are two halves, and you can stop after the first:
 | **A. Road network** | The city's roads as an ASAM **OpenDRIVE** `.xodr`. Drives in any CARLA. | An afternoon. Only needs UE 5.8 + City Sample. |
 | **B. The whole city** | CARLA serving the City Sample level itself — buildings, props, lighting. | Also needs CARLA built from source against its UE 5.8 fork. |
 
-**Validated on `Small_City_LVL`:** 3,337 roads · 172 junctions · 145 km ·
-2,861 spawn points · 52-53 of 54 vehicles driving at a median 30 km/h.
+**Validated on `Small_City_LVL` (CARLA 1.0):** 3,337 roads · 172 junctions
+(`2,263` entries) · 145 km · 4,672 spawn points · 58/58 autopilot vehicles
+surviving (54 moving at a median 30 km/h).
 
 Background: [carla#9852](https://github.com/carla-simulator/carla/issues/9852).
 
-**CARLA 1.0 status.** The exported road network, signal phases, and pedestrian mesh passed runtime checks on the official Windows package. The repository includes a patch for the full City Sample integration. The full server measurements below use the legacy revision. Its 1.0 build and runtime checks are pending.
+**CARLA 1.0 status.** Built from source (`3ea166118d2c` against engine fork
+`b76fce0e3bcb` and content `55228c1ccca1`) and verified end-to-end on
+`Small_City_LVL`: road routing (`200/200` 500 m walks), Traffic Manager
+(`58/58` alive, `354/408` red-light stops), 355 traffic lights across 106
+junctions, 217 stop signs, 605-tile pedestrian navmesh (`30/30` walkers
+moving), Mass traffic and crowd bridge (`250` proxies, full turnover on
+spectator relocation), RGB/depth/segmentation cameras (`0.1–0.5 %` unlabeled
+once settled), semantic and plain LiDAR (`2.9 %` unlabeled, zero ego
+self-hits), radar (`1,980` detections), `ground_projection`, and `cast_ray`.
 
 > ### ⚠ Read this before collecting any data
 >
@@ -682,10 +691,12 @@ SetupWithBuildTools.bat  CarlaSetup.bat replacement for VS Build Tools
 config/
   CarlaTagger.DefaultGame.ini    label rules, appended to the project's ini
 patches/
-  carla-ue58-plugin-build-fixes.patch   19 files: makes the Carla plugin
-                         compile and boot, adds the collision channels, the
-                         label rules, the traffic-light manager fix and the
-                         navigation fallback
+  carla-1.0-citysample.patch       22 files: ports the City Sample integration
+                         (collision channels, FastGeo hit/path labels, dormant
+                         Mass registry, deferred traffic-light models, ego
+                         ray-cast ignore, navigation fallback) to CARLA 1.0
+  carla-ue58-plugin-build-fixes.patch   19 files: historical patch for legacy
+                         ue58-dev-carla (de3f38e64)
 tools/
   zonegraph_to_roadnetwork.py    lanes -> roads + junctions      [--selftest]
   roadnetwork_to_xodr.py         roads -> OpenDRIVE 1.4          [--selftest]
@@ -834,7 +845,27 @@ of a correct junction can legitimately show every light red.
 > `uncontrolled approaches at signalised junctions`, which should be 0.
 > `--no-complete-junctions` restores the old output.
 
-**The full city**, CARLA 0.10.0 serving `Small_City_LVL`:
+**The full city**, CARLA 1.0 (`3ea166118d2c` / engine `b76fce0e3bcb`) serving `Small_City_LVL`:
+
+```
+map               : Map/Small_City_LVL
+topology / spawns : 4,672 segments, 2,263 junction entries, 4,672 spawn points
+route reach       : 200/200 random walks reached 500 m
+traffic manager   : 58/60 spawned, 58/58 alive, 54 moving (median 30 km/h, max 46)
+signals           : 355 traffic lights (106 groups, cycling), 217 stop signs,
+                    354/408 red-light samples stationary (87%)
+mass bridge       : 250 dormant proxies (150 vehicles, 100 walkers), both moving,
+                    250/250 replaced after a 1,447 m spectator move
+sensors           : unparented semantic LiDAR 232,596 pts (2.9% Unlabeled),
+                    attached LiDAR 258,385 pts (0 ego self-hits),
+                    plain LiDAR 127,430 pts, radar 1,980 detections,
+                    ground_projection + cast_ray (2 roadway hits) PASS
+segmentation      : 0.5% then 0.1% Unlabeled across settled 800x600 runs
+                    (0.00% pixels > 29; 214 FastGeo containers, 106,949 seen, 0 unmatched)
+walkers           : 605-tile navmesh, 20/20 random points, 30/30 walkers moved (median 20.9 m)
+```
+
+Earlier baseline on legacy CARLA 0.10.0 (`de3f38e64`, pre-junction-id export):
 
 ```
 map           : Map/Small_City_LVL
@@ -1006,9 +1037,10 @@ Everything here was measured on the running server, not inferred.
   intersection semantics Epic records are "has a traffic light" or not. Stop
   signs ARE emitted, from exactly that distinction. There are no speed limits
   to export either, so CARLA applies its default 30 km/h.
-- **`set_autopilot(True)` got the vehicle destroyed — cause found and fixed in
-  the converter, not yet re-measured on this server.** The traffic manager
-  removed it, and the network was why: CARLA's parser ignores `elementType`
+- **Older `.xodr` exports break `set_autopilot(True)` at junctions (fixed in
+  current exports, verified on CARLA 1.0 with 58/58 vehicles surviving).** On
+  exports made before the junction-id fix, the traffic manager
+  removed vehicles, and the network was why: CARLA's parser ignores `elementType`
   and treats a link to junction *k* as a link to road *k* whenever road *k*
   exists, and the converter numbered junctions 0..171 beside roads 0..3336. So
   every road entering a junction was a dead end, and the TM destroys any

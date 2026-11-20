@@ -19,9 +19,10 @@ trap 'echo "FAILED at line $LINENO" >&2' ERR
 #
 # LFS_CACHE matters on a small system drive: git-lfs keeps a full second copy of
 # every object it downloads, so point it at a roomy volume.
-# CARLA_DIR is what the PowerShell scripts and the README use; accept both so
-# one exported variable covers the whole pipeline.
-CARLA_ROOT=$(cd "${CARLA_ROOT:-${CARLA_DIR:-/c/carla-ue58/carla}}" && pwd -P)
+# CARLA_DIR is what the PowerShell scripts and the README use; prefer it over
+# CARLA_ROOT, which CARLA's binary package documentation often points at a
+# non-Git shipping install.
+CARLA_ROOT=$(cd "${CARLA_DIR:-${CARLA_ROOT:-/c/carla-ue58/carla}}" && pwd -P)
 DEST="${DEST:-$CARLA_ROOT/Unreal/CarlaUnreal/Content/Carla}"
 URL="${CONTENT_URL:-https://bitbucket.org/carla-simulator/carla-content.git}"
 CACHE="${LFS_CACHE:-$CARLA_ROOT/.lfs-cache}"
