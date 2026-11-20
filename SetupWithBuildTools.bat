@@ -38,7 +38,7 @@ set "FETCH=%~dp0tools\fetch-carla-content.sh"
 set "SKIP_CONTENT="
 if /I "%~1"=="--skip-content" set "SKIP_CONTENT=1"
 
-if not defined CARLA_UNREAL_ENGINE_PATH set "CARLA_UNREAL_ENGINE_PATH=%CARLA_UE_DIR%"
+if not "%CARLA_UE_DIR%"=="" set "CARLA_UNREAL_ENGINE_PATH=%CARLA_UE_DIR%"
 if "%CARLA_UNREAL_ENGINE_PATH%"=="" (
     echo ERROR: Set CARLA_UNREAL_ENGINE_PATH or CARLA_UE_DIR to the built engine.
     exit /b 1

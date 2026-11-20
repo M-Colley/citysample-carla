@@ -39,8 +39,8 @@ def main() -> int:
     ap.add_argument("--watch", type=float, default=0.0,
                     help="seconds to watch one group cycle. A full cycle here "
                          "is green 10s + yellow 3s + all-red 2s per arm, so "
-                         "give it 25s or more - a shorter window can sit "
-                         "inside one phase and look static when it is not")
+                         "give it 30s or more. Exits nonzero if no phase "
+                         "change was observed")
     args = ap.parse_args()
 
     client = carla.Client(args.host, args.port)
@@ -91,18 +91,21 @@ def main() -> int:
     # -1 for every one of them and reads as "no junctions covered". Count the
     # distinct groups instead - ATrafficLightGroup is created per junction.
     seen_groups, n_groups = set(), 0
+    sample = None
     for t in lights:
         try:
-            ids = frozenset(x.id for x in t.get_group_traffic_lights())
+            members = t.get_group_traffic_lights()
         except RuntimeError:
             continue
+        if sample is None and len(members) > 1:
+            sample = t, members
+        ids = frozenset(x.id for x in members)
         if ids and ids not in seen_groups:
             seen_groups.add(ids)
             n_groups += 1
     print(f"  distinct junction groups: {n_groups:,}")
 
-    t0 = lights[0]
-    grp = t0.get_group_traffic_lights()
+    t0, grp = sample if sample is not None else (lights[0], lights[:1])
     print(f"\n=== sample group (light {t0.id}) ===")
     print(f"  size {len(grp)}   green={t0.get_green_time():.0f}s "
           f"yellow={t0.get_yellow_time():.0f}s red={t0.get_red_time():.0f}s")
@@ -188,8 +191,8 @@ def main() -> int:
     if args.watch > 0:
         print(f"\n=== watching {args.watch:.0f}s ===")
         seen = set()
-        end = time.time() + args.watch
-        while time.time() < end:
+        end = time.monotonic() + args.watch
+        while time.monotonic() < end:
             snap = tuple(str(x.state)[0] for x in grp)
             if snap not in seen:
                 seen.add(snap)
@@ -197,14 +200,12 @@ def main() -> int:
             time.sleep(0.5)
         if len(seen) > 1:
             print(f"  {len(seen)} distinct phase patterns observed (cycling)")
-        elif args.watch < 25.0:
-            # Not a failure: one arm holds green for 10s, and the whole cycle
-            # runs about 30s, so a short window legitimately sees one pattern.
-            print(f"  1 pattern in {args.watch:.0f}s - INCONCLUSIVE, not a "
-                  f"failure. Re-run with --watch 30 to see a whole cycle.")
         else:
-            print(f"  1 pattern in {args.watch:.0f}s - STATIC, the lights are "
-                  f"not cycling")
+            print(f"  no phase change observed in {args.watch:.0f}s",
+                  file=sys.stderr)
+            if args.watch < 30.0:
+                print("  re-run with --watch 30 or longer", file=sys.stderr)
+            return 1
     return 0
 
 

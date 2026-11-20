@@ -14,6 +14,7 @@ channel. So we check:
   * an UNPARENTED lidar 10 m above the road returns points          <- the real test
   * the returned distances are spread, not collapsed into a shell
   * semantic lidar reports object ids/tags other than the ego
+  * a nonsemantic lidar also returns points from the world
   * radar returns detections
   * ground_projection / cast_ray (URayTracer) come back non-empty
 
@@ -93,7 +94,7 @@ def describe(name, dists):
     print(f"  {name:<26} {n:>8,} points   "
           f"min {dists[0]:5.1f}  median {dists[n // 2]:6.1f}  max {dists[-1]:7.1f} m   "
           f"{beyond5 * 100:5.1f}% beyond 5 m")
-    return True
+    return beyond5 > 0 and dists[-1] - dists[0] >= 1.0
 
 
 def main() -> int:
@@ -118,30 +119,36 @@ def main() -> int:
     spawned = []
     ok = {}
     try:
-        sp = cmap.get_spawn_points()[0]
-
         # Hero: 3 km streaming ring instead of 200 m.
         vbp = [b for b in bl.filter("vehicle.*")
                if b.has_attribute("number_of_wheels")
                and int(b.get_attribute("number_of_wheels")) == 4][0]
         if vbp.has_attribute("role_name"):
             vbp.set_attribute("role_name", "hero")
-        ego = world.try_spawn_actor(vbp, sp)
-        if ego:
-            spawned.append(ego)
-        print(f"ego: {ego.type_id if ego else 'FAILED'}  at "
-              f"({sp.location.x:.0f}, {sp.location.y:.0f})")
+        ego = None
+        for sp in cmap.get_spawn_points()[:20]:
+            ego = world.try_spawn_actor(vbp, sp)
+            if ego is not None:
+                break
+        if ego is None:
+            print("ego could not spawn at any of the first 20 spawn points",
+                  file=sys.stderr)
+            return 1
+        spawned.append(ego)
+        print(f"ego: {ego.type_id} at ({sp.location.x:.0f}, {sp.location.y:.0f})")
         for _ in range(40):
             world.tick()
 
         print("\n=== semantic lidar ===")
         lbp = bl.find("sensor.lidar.ray_cast_semantic")
-        lbp.set_attribute("range", "100")
-        lbp.set_attribute("channels", "64")
-        lbp.set_attribute("points_per_second", "500000")
-        lbp.set_attribute("rotation_frequency", "20")
-        lbp.set_attribute("upper_fov", "10")
-        lbp.set_attribute("lower_fov", "-30")
+        plain_bp = bl.find("sensor.lidar.ray_cast")
+        for lidar_bp in (lbp, plain_bp):
+            lidar_bp.set_attribute("range", "100")
+            lidar_bp.set_attribute("channels", "64")
+            lidar_bp.set_attribute("points_per_second", "500000")
+            lidar_bp.set_attribute("rotation_frequency", "20")
+            lidar_bp.set_attribute("upper_fov", "10")
+            lidar_bp.set_attribute("lower_fov", "-30")
 
         # THE control: unparented, 10 m up. Nothing of the ego can be hit, so any
         # point at all proves world geometry now blocks SensorTrace.
@@ -157,11 +164,18 @@ def main() -> int:
 
         # Attached, to confirm the ego-ignore actually suppresses self-hits.
         att = world.spawn_actor(lbp, carla.Transform(carla.Location(z=2.4)),
-                                attach_to=ego) if ego else None
-        if att:
-            spawned.append(att)
-            ad, atags, aids = lidar_stats(collect(world, att, 12))
-            ok["lidar_ego"] = describe("attached to ego", ad)
+                                attach_to=ego)
+        spawned.append(att)
+        ad, _, aids = lidar_stats(collect(world, att, 12))
+        ego_hit = ego.id in aids
+        ok["lidar_ego"] = describe("attached to ego", ad) and not ego_hit
+        print(f"    hits on ego id {ego.id}: {'yes' if ego_hit else 'no'}")
+
+        print("\n=== nonsemantic lidar ===")
+        plain = world.spawn_actor(plain_bp, free_tf)
+        spawned.append(plain)
+        pd, _, _ = lidar_stats(collect(world, plain, 12))
+        ok["lidar_plain"] = describe("unparented", pd)
 
         print("\n=== radar ===")
         rbp = bl.find("sensor.other.radar")
@@ -180,11 +194,21 @@ def main() -> int:
         print(f"  ground_projection          {'None -- FAIL' if gp is None else gp.location}")
         ok["ground_projection"] = gp is not None
 
-        a = carla.Location(sp.location.x, sp.location.y, sp.location.z + 2.0)
-        b = carla.Location(a.x + 150.0, a.y, a.z)
-        hits = world.cast_ray(a, b)
-        print(f"  cast_ray over 150 m        {len(hits):>8,} hits")
-        ok["cast_ray"] = len(hits) > 1
+        # Trace through a road waypoint away from the ego. A horizontal ray
+        # over an unobstructed street can legitimately return no hits.
+        wp = cmap.get_waypoint(sp.location)
+        near_road = (wp.next(10.0) or wp.previous(10.0)) if wp else []
+        ok["cast_ray"] = False
+        if near_road:
+            road = near_road[0].transform.location
+            a = carla.Location(road.x, road.y, road.z + 4.0)
+            b = carla.Location(road.x, road.y, road.z - 4.0)
+            hits = world.cast_ray(a, b)
+            print(f"  cast_ray through roadway  {len(hits):>8,} hits at "
+                  f"({road.x:.1f}, {road.y:.1f}, {road.z:.1f})")
+            ok["cast_ray"] = bool(hits)
+        else:
+            print("  could not locate a road waypoint away from the ego")
 
         print("\n=== semantic segmentation encoding ===")
         cbp = bl.find("sensor.camera.semantic_segmentation")
@@ -195,7 +219,7 @@ def main() -> int:
             carla.Rotation(pitch=-20.0)))
         spawned.append(cam)
         imgs = collect(world, cam, 25)
-        if imgs:
+        if imgs and imgs[-1].raw_data:
             raw = bytes(imgs[-1].raw_data)
             r = raw[2::4]                      # BGRA -> R channel holds the label
             hist = collections.Counter(r)
@@ -203,12 +227,14 @@ def main() -> int:
             print(f"  distinct label values      {len(hist):>8}   (valid range is 0..29)")
             print(f"  pixels with R > 29         {over * 100:>7.2f}%   (was 8.7-100%)")
             print(f"  top labels: {dict(hist.most_common(6))}")
-            ok["segmentation"] = over == 0.0 and len(hist) <= 30
+            labeled = sum(1 <= label <= 29 for label in hist)
+            print(f"  distinct nonzero labels    {labeled:>8}   (need at least 2)")
+            ok["segmentation"] = over == 0.0 and labeled >= 2
         else:
             print("  no frame")
             ok["segmentation"] = False
     finally:
-        for a_ in spawned:
+        for a_ in reversed(spawned):
             try:
                 if a_.is_alive:
                     a_.destroy()
