@@ -107,6 +107,8 @@ cmake --build Build
 if errorlevel 1 exit /b 1
 cmake --build Build --target carla-unreal-configure
 if errorlevel 1 exit /b 1
+cmake --build Build --target RecastBuilder
+if errorlevel 1 exit /b 1
 
 echo === python api ===
 cmake --build Build --target %PYTHON_TARGET%

@@ -12,8 +12,8 @@
     caller can chain a client script immediately.
 
 .PARAMETER Map
-    Which City Sample level. Small_City_LVL loads far faster than Big_City_LVL
-    and is the one the road-network export was validated against.
+    Which City Sample level (Small_City_LVL or Big_City_LVL). Small_City_LVL
+    loads faster than Big_City_LVL; both road networks and navmeshes are supported.
 
 .PARAMETER RenderOffScreen
     No window. Useful over RDP or for headless validation runs.

@@ -121,6 +121,19 @@ def label_panel(arr: np.ndarray, text: str) -> Image.Image:
     return im
 
 
+def branch_reach(wp, limit: float = 300.0, step: float = 10.0) -> float:
+    """How far `wp` can travel along driving successors before hitting a dead end."""
+    dist = 0.0
+    cur = wp
+    while cur is not None and dist < limit:
+        nxt = cur.next(step)
+        if not nxt:
+            break
+        cur = nxt[0]
+        dist += step
+    return dist
+
+
 class RouteDriver:
     """Drive a vehicle along the OpenDRIVE network with pure pursuit.
 
@@ -146,7 +159,8 @@ class RouteDriver:
         self.lookahead = lookahead
         self.target = target_kmh
         self.route = []
-        self._extend(60)
+        self.stopped_ticks = 0
+        self._extend(80)
 
     def _extend(self, n):
         import random
@@ -160,10 +174,41 @@ class RouteDriver:
             nxt = wp.next(self.step)
             if not nxt:
                 break
-            # At a junction several successors are offered; pick one at random
-            # so a long recording does not loop the same block.
-            wp = nxt[0] if len(nxt) == 1 else random.choice(nxt)
+            if len(nxt) == 1:
+                wp = nxt[0]
+            else:
+                # Prefer branches that do not terminate at a map-edge dead end.
+                scored = [(branch_reach(c, 300.0), c) for c in nxt]
+                best = max(s for s, _ in scored)
+                viable = [c for s, c in scored if s >= max(100.0, best - 20.0)]
+                wp = random.choice(viable or nxt)
             self.route.append(wp)
+
+    def _try_adjacent_lane(self, loc, fwd) -> bool:
+        """Switch to a parallel driving lane when blocked by a stationary vehicle."""
+        right_x, right_y = -fwd.y, fwd.x
+        others = list(self.world.get_actors().filter("vehicle.*")) if self.world else []
+        for side in (-3.6, 3.6, -7.0, 7.0):
+            probe = carla.Location(
+                loc.x + fwd.x * 9.0 + right_x * side,
+                loc.y + fwd.y * 9.0 + right_y * side,
+                loc.z)
+            cand = self.map.get_waypoint(probe, project_to_road=True,
+                                         lane_type=carla.LaneType.Driving)
+            if cand is None or cand.transform.location.distance(probe) > 2.2:
+                continue
+            cfwd = cand.transform.get_forward_vector()
+            if cfwd.x * fwd.x + cfwd.y * fwd.y < 0.75:
+                continue
+            if branch_reach(cand, 200.0) < 150.0:
+                continue
+            cloc = cand.transform.location
+            if any(o.id != self.v.id and o.get_location().distance(cloc) < 6.0 for o in others):
+                continue
+            self.route = [cand]
+            self._extend(80)
+            return True
+        return False
 
     def tick(self):
         loc = self.v.get_location()
@@ -209,7 +254,18 @@ class RouteDriver:
                 lateral = abs(ox * right_x + oy * right_y)
                 if 1.5 < ahead < gap and lateral < 2.2:
                     gap = ahead
-        if gap < 8.5 or ego_light_state(self.v) == "Red":
+        at_red = ego_light_state(self.v) == "Red"
+        if kmh < 1.0 and not at_red:
+            self.stopped_ticks += 1
+        else:
+            self.stopped_ticks = 0
+
+        if self.stopped_ticks >= 160:
+            if self._try_adjacent_lane(loc, fwd):
+                self.stopped_ticks = 0
+                gap = 999.0
+
+        if gap < 8.5 or at_red:
             want = 0.0
         elif gap < 16.0:
             want = min(want, self.target * (gap - 8.5) / 7.5)
@@ -326,8 +382,13 @@ def main() -> int:
         # the city loads around it rather than around the spectator.
         if ego_bp.has_attribute("role_name"):
             ego_bp.set_attribute("role_name", "hero")
+        cmap = world.get_map()
         ego_spawn = None
         for sp in random.sample(spawns, len(spawns)):
+            start_wp = cmap.get_waypoint(sp.location, project_to_road=True,
+                                         lane_type=carla.LaneType.Driving)
+            if start_wp is not None and branch_reach(start_wp, 350.0) < 300.0:
+                continue
             ego = world.try_spawn_actor(ego_bp, sp)
             if ego:
                 ego_spawn = sp

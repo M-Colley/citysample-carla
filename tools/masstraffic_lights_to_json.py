@@ -35,9 +35,10 @@ import json
 import struct
 import sys
 
-# Small City ships exactly this many authored lights. A different number means
-# either the wrong asset or a changed level, both worth shouting about.
+# Small City and Big City ship fixed counts of authored lights. A different
+# number means either the wrong asset or a changed level, both worth shouting about.
 EXPECTED_SMALL_CITY = 358
+EXPECTED_BIG_CITY = 2218
 
 
 def _read_summary(d: bytes):
@@ -257,8 +258,13 @@ def main() -> int:
         ap.error("an input .uasset is required (or --selftest)")
 
     lights = parse(args.input)
-    if "SmallCity" in args.input.replace("_", "") and len(lights) != EXPECTED_SMALL_CITY:
+    normalized_name = args.input.replace("_", "")
+    if "SmallCity" in normalized_name and len(lights) != EXPECTED_SMALL_CITY:
         print(f"WARNING: expected {EXPECTED_SMALL_CITY} lights for Small City, "
+              f"got {len(lights)}. Wrong asset, or the level changed.",
+              file=sys.stderr)
+    elif "BigCity" in normalized_name and len(lights) != EXPECTED_BIG_CITY:
+        print(f"WARNING: expected {EXPECTED_BIG_CITY} lights for Big City, "
               f"got {len(lights)}. Wrong asset, or the level changed.",
               file=sys.stderr)
 
