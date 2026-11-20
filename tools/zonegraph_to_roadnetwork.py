@@ -66,11 +66,52 @@ LANE_TYPE_BY_TAG = [
 ]
 
 
-def lane_type(tags: list[str]) -> str:
+def explicit_lane_type(tags: list[str]) -> str | None:
     for tag, odr in LANE_TYPE_BY_TAG:
         if tag in tags:
             return odr
-    return "driving"
+    return None
+
+
+def lane_type(tags: list[str]) -> str:
+    return explicit_lane_type(tags) or "driving"
+
+
+def resolve_lane_types(lanes: list[dict]) -> dict[int, str]:
+    """Resolve OpenDRIVE lane type for every lane, propagating across links when
+    Epic left a ZoneGraph shape's tags blank (17 1 m sidewalk lanes in
+    Big_City_LVL carry tags=[] while linking only to Pedestrian/Crosswalk lanes)."""
+    by_idx = {ln["index"]: ln for ln in lanes}
+    resolved: dict[int, str] = {}
+    queue: list[int] = []
+    for ln in lanes:
+        lt = explicit_lane_type(ln.get("tags", []))
+        if lt is not None:
+            resolved[ln["index"]] = lt
+            queue.append(ln["index"])
+
+    adj: dict[int, list[int]] = defaultdict(list)
+    for ln in lanes:
+        u = ln["index"]
+        for lk in ln.get("links", []):
+            v = lk.get("dest")
+            if v in by_idx:
+                adj[u].append(v)
+                adj[v].append(u)
+
+    head = 0
+    while head < len(queue):
+        u = queue[head]
+        head += 1
+        for v in adj.get(u, ()):
+            if v not in resolved:
+                resolved[v] = resolved[u]
+                queue.append(v)
+
+    for ln in lanes:
+        if ln["index"] not in resolved:
+            resolved[ln["index"]] = "driving"
+    return resolved
 
 
 class UnionFind:
@@ -171,6 +212,8 @@ def convert(doc: dict, *, keep_sidewalks: bool = False) -> dict:
         prefix = graph.get("actor", "zg")
         crosswalks.extend(extract_crosswalks(lanes))
 
+        ltypes = resolve_lane_types(lanes)
+
         def drivable(ln: dict) -> bool:
             if keep_sidewalks:
                 # Crossings are already emitted as crosswalk objects. As
@@ -178,17 +221,7 @@ def convert(doc: dict, *, keep_sidewalks: bool = False) -> dict:
                 # straight across the carriageway in the navmesh, over the
                 # crosswalk area that tells a walker it is crossing.
                 return "Crosswalk" not in ln.get("tags", [])
-            return lane_type(ln.get("tags", [])) != "sidewalk"
-
-        # Groups are still needed, but only to identify junctions: an
-        # Adjacent-linked cluster containing an Intersection lane is one junction.
-        lane_to_junction: dict[int, str] = {}
-        for gi, group in enumerate(group_lanes(lanes)):
-            members = [lanes[i] for i in group]
-            if any("Intersection" in m.get("tags", []) for m in members):
-                jid = f"{prefix}_j{gi}"
-                for m in members:
-                    lane_to_junction[m["index"]] = jid
+            return ltypes[ln["index"]] != "sidewalk"
 
         # A lane becomes a road iff it is drivable and has real geometry.
         emitted: set[int] = set()
@@ -200,6 +233,20 @@ def convert(doc: dict, *, keep_sidewalks: bool = False) -> dict:
                 stats["skipped_short"] += 1
                 continue
             emitted.add(ln["index"])
+
+        # Groups are still needed, but only to identify junctions: an
+        # Adjacent-linked cluster of emitted lanes containing an Intersection
+        # lane is one junction. Restricting to emitted lanes prevents skipped
+        # Pedestrian Intersection lanes from creating empty junctions or pulling
+        # adjacent lanes into them.
+        emitted_lanes = [ln for ln in lanes if ln["index"] in emitted]
+        lane_to_junction: dict[int, str] = {}
+        for gi, group in enumerate(group_lanes(emitted_lanes)):
+            members = [emitted_lanes[i] for i in group]
+            if any("Intersection" in m.get("tags", []) for m in members):
+                jid = f"{prefix}_j{gi}"
+                for m in members:
+                    lane_to_junction[m["index"]] = jid
 
         def road_id(idx: int) -> str | None:
             return f"{prefix}_l{idx}" if idx in emitted else None
@@ -225,18 +272,18 @@ def convert(doc: dict, *, keep_sidewalks: bool = False) -> dict:
                 if t not in ("Outgoing", "Incoming"):
                     continue
                 dest = lk.get("dest")
-                dj = lane_to_junction.get(dest)
                 dr = road_id(dest)
+                if not dr:
+                    stats["unresolved_links"] += 1
+                    continue
+                dj = lane_to_junction.get(dest)
                 if dj and dj != jid:
                     cand = {"type": "junction", "id": dj}
-                elif dr:
+                else:
                     # Arriving at the successor's start / leaving from the
                     # predecessor's end.
                     cand = {"type": "road", "id": dr,
                             "contact": "start" if t == "Outgoing" else "end"}
-                else:
-                    stats["unresolved_links"] += 1
-                    continue
                 if t == "Outgoing":
                     succ_targets.add((cand["type"], cand["id"]))
                     if succ is None:
@@ -267,7 +314,7 @@ def convert(doc: dict, *, keep_sidewalks: bool = False) -> dict:
                 "lane_count": 1,
                 "lane_offset_cm": width / 2.0,
                 "is_freeway": "Freeway" in tags,
-                "lane_type": lane_type(tags),
+                "lane_type": ltypes[idx],
                 "tags": tags,
                 **({"junction": jid} if jid else {}),
                 **({"successor": succ} if succ else {}),
@@ -403,6 +450,31 @@ def selftest() -> int:
     kept = convert(doc, keep_sidewalks=True)
     if len(kept["roads"]) != 4:
         fails.append(f"--keep-sidewalks should yield 4 roads, got {len(kept['roads'])}")
+
+    # Untagged sidewalk lanes (Big_City_LVL has 17 1 m lanes with tags=[] linked
+    # only to Pedestrian/Crosswalk lanes) must inherit "sidewalk" from their
+    # neighbours instead of defaulting to "driving" and creating dead-end
+    # junction approaches.
+    untagged_sw = {
+        "source": "selftest-untagged-sidewalk",
+        "zone_graphs": [{
+            "actor": "zg",
+            "lanes": [
+                {"index": 0, "width_cm": 100.0, "tags": [],
+                 "points": [{"pos": [0, 0, 0]}, {"pos": [500, 0, 0]}],
+                 "links": [{"dest": 1, "type": "Outgoing", "flags": []}]},
+                {"index": 1, "width_cm": 100.0, "tags": ["Pedestrian", "Intersection"],
+                 "points": [{"pos": [500, 0, 0]}, {"pos": [900, 0, 0]}],
+                 "links": [{"dest": 0, "type": "Incoming", "flags": []}]},
+            ],
+        }],
+    }
+    sw_default = convert(untagged_sw)
+    if sw_default["roads"] or sw_default["junctions"]:
+        fails.append(f"untagged sidewalk leaked into driving network: {sw_default['roads']}")
+    sw_kept = convert(untagged_sw, keep_sidewalks=True)
+    if {r["id"]: r["lane_type"] for r in sw_kept["roads"]} != {"zg_l0": "sidewalk", "zg_l1": "sidewalk"}:
+        fails.append(f"untagged sidewalk did not inherit sidewalk type: {sw_kept['roads']}")
 
     if fails:
         print("SELFTEST FAILED")
