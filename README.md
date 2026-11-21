@@ -9,10 +9,9 @@ CARLA traffic, real CARLA sensors.
 ![CARLA driving through the City Sample, four sensors at once](docs/citysample-carla.gif)
 
 *Four synchronised CARLA 1.0 sensors on Epic's City Sample (`Big_City_LVL`):
-RGB, semantic segmentation, depth, and a top-down LiDAR sweep. Every panel is a
-thing that returned nothing at all before the fixes in this repository.
-Recorded with `python tools/record_carla.py --gif` — the full 3-minute drive is
-[docs/citysample-carla.mp4](docs/citysample-carla.mp4).*
+RGB, semantic segmentation, depth, and a top-down LiDAR sweep. The inline GIF
+is a 5.5× time-lapse of the entire 3-minute drive (`9.05 MB`); the real-time
+3-minute MP4 (`9.08 MB`) is [docs/citysample-carla.mp4](docs/citysample-carla.mp4).*
 
 There are two halves, and you can stop after the first:
 
@@ -41,18 +40,21 @@ unlabeled, zero ego self-hits), radar (`1,980` and `2,947` detections),
 
 > ### ⚠ Read this before collecting any data
 >
-> **Working** — cameras, depth, GNSS, IMU, collision sensors, vehicle control,
-> **LiDAR, radar, `ground_projection`, `cast_ray`**, **353 traffic lights**
-> across 106 junctions and **229 stop signs** across the other 66, **1,096
-> crosswalks**, **camera semantic segmentation** (0.5 % unlabeled), **semantic
-> LiDAR** (3.3 % unlabeled), **pedestrian navigation**, and **Epic's own
-> traffic and crowd** mirrored into `world.get_actors()`.
+> **Working on both `Small_City_LVL` and `Big_City_LVL` (CARLA 1.0)** — cameras,
+> depth, GNSS, IMU, collision sensors, vehicle control, **LiDAR, radar,
+> `ground_projection`, `cast_ray`**, **355 / 2,176 traffic lights** across
+> 106 / 619 junctions and **209 / 2,133 kerbside stop signs** across the other
+> 66 / 615 (`0` poles in driving lanes), **1,096 / 8,310 crosswalks**, **camera
+> semantic segmentation** (`0.1–0.5 %` unlabeled on `Small_City_LVL`; `2.7–6.9 %`
+> on `Big_City_LVL` where open sky atmosphere has no mesh), **semantic LiDAR**
+> (`2.9 %` / `0.26 %` unlabeled, `0` ego self-hits), **pedestrian navigation**,
+> and **Epic's own traffic and crowd** mirrored into `world.get_actors()`.
 >
 > Three of those are **opt-in**, because each one changes what the server does:
 >
 > | flag | what it turns on | step |
 > |---|---|---|
-> | `-ExecCmds "carla.FastGeoTagger.Enable 1"` | camera semantic labels for the city geometry | §3.10 |
+> | `-ExecCmds "carla.FastGeoTagger.Enable 1"` | camera & LiDAR semantic labels for the city geometry | §3.10 |
 > | `-ExecCmds "carla.MassBridge.Enable 1"` | Epic's traffic *and crowd* visible to `world.get_actors()` | §3.9 |
 > | a built navmesh in `Content\Map\Nav\` | walkers and `get_random_location_from_navigation()` | §3.11 |
 >
@@ -60,21 +62,22 @@ unlabeled, zero ego self-hits), radar (`1,980` and `2,947` detections),
 >
 > - **Semantic LiDAR needs the tagger too.** It labels its hits through the
 >   same FastGeo tagger the camera uses, so without
->   `carla.FastGeoTagger.Enable 1` it returns mostly tag 0; with it, 3.3 % of
->   points stay unlabeled (§11).
+>   `carla.FastGeoTagger.Enable 1` it returns mostly tag 0; with it, `0.26–2.9 %`
+>   of points stay unlabeled (§11).
 > - **Yield and speed-limit signs are absent.** City Sample does not author
 >   them. Traffic lights and stop signs are emitted (§11).
-> - **Sidewalks are synthesised, not measured.** The exported road network has
->   no sidewalk lanes, so pedestrian navigation runs on 2.5 m strips laid along
->   the carriageway edges. They approximate where the real sidewalks are (§3.11).
+> - **Sidewalks are synthesised by default, not measured.** The default road
+>   export omits pedestrian lanes, so pedestrian navigation runs on 2.5 m strips
+>   laid along the carriageway edges (`--keep-sidewalks` exports Epic's own
+>   ZoneGraph pedestrian lanes instead; §3.11).
 > - **The Mass bridge is read-only** and must not be run alongside CARLA's
 >   Traffic Manager. It mirrors the entities **nearest the spectator**, capped
 >   by `carla.MassBridge.MaxProxies` (150 vehicles) and
 >   `carla.MassBridge.MaxWalkers` (100) — so it shows you the traffic you can
 >   see, not a sample of the whole city, but it is a window, not a census.
 >
-> Good for control, planning, navigation, signalised junctions, pedestrians and
-> LiDAR/radar work. For semantic segmentation, use the camera, not the LiDAR.
+> Good for control, planning, navigation, signalised junctions, pedestrians,
+> camera segmentation, and semantic/plain LiDAR + radar work.
 
 ---
 

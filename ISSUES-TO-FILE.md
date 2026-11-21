@@ -9,19 +9,22 @@ CARLA itself; and issue 9 on any map the traffic manager was not designed for.
 Verified against `carla-simulator/carla@de3f38e64` (`ue58-dev-carla`) on
 2026-09-02 (issues 6-8 on 2026-09-03, issue 9 on 2026-09-04).
 
-**Filing status.** Eight of the nine are filed upstream. Only issue 2 is not.
+**Filing & CARLA `1.0` (`3ea166118d2c`) status.** Eight of the original nine are filed upstream; CARLA `1.0` resolved Issues 2 and 3, while three additional upstream issues were identified and patched locally in `patches/carla-1.0-citysample.patch` during the `1.0` port:
 
-| # | upstream | title |
-|---|---|---|
-| 1 | [#9863](https://github.com/carla-simulator/carla/issues/9863) | `CarlaSetup.bat` fails with only VS 2022 Build Tools |
-| 2 | **not filed** | Windows build docs still say UE 5.5 / `ue5-dev` |
-| 3 | [#9864](https://github.com/carla-simulator/carla/issues/9864) | `Carla` plugin fails to compile on `ue58-dev-carla` |
-| 4 | [#9865](https://github.com/carla-simulator/carla/issues/9865) | Access violation at startup — CDOs at `PostConfigInit` |
-| 5 | [#9866](https://github.com/carla-simulator/carla/issues/9866) | `ACarlaGameModeBase` spawns a second sun |
-| 6 | [#9872](https://github.com/carla-simulator/carla/issues/9872) | Walker navigation dead on an unbuilt `RecastNavMesh` |
-| 7 | [#9871](https://github.com/carla-simulator/carla/issues/9871) | `get_random_location_from_navigation()` returns `None` forever |
-| 8 | [#9870](https://github.com/carla-simulator/carla/issues/9870) | The two navmesh lookups look in different places |
-| 9 | [#9869](https://github.com/carla-simulator/carla/issues/9869) | ~~Autopilot destroys the vehicle mid-drive~~ — corrected and retitled 2026-10-09: *OpenDRIVE parser ignores a link's elementType* ([comment](https://github.com/carla-simulator/carla/issues/9869#issuecomment-6076656971)) |
+| # | upstream | CARLA 1.0 status | title |
+|---|---|---|---|
+| 1 | [#9863](https://github.com/carla-simulator/carla/issues/9863) | **Still open / present** (mitigated by `SetupWithBuildTools.bat`) | `CarlaSetup.bat` fails with only VS 2022 Build Tools |
+| 2 | not filed | **Fixed in `1.0`** (`Docs/build_windows_ue5.md` now targets UE 5.8) | Windows build docs still say UE 5.5 / `ue5-dev` |
+| 3 | [#9864](https://github.com/carla-simulator/carla/issues/9864) | **Closed / Fixed in `1.0`** | `Carla` plugin fails to compile on `ue58-dev-carla` |
+| 4 | [#9865](https://github.com/carla-simulator/carla/issues/9865) | **Still open / present** (patched in `carla-1.0-citysample.patch`) | Access violation at startup — CDOs at `PostConfigInit` |
+| 5 | [#9866](https://github.com/carla-simulator/carla/issues/9866) | **Still open / present** (worked around via `sun_altitude_angle = -90`) | `ACarlaGameModeBase` spawns a second sun |
+| 6 | [#9872](https://github.com/carla-simulator/carla/issues/9872) | **Still open / present** (patched in `carla-1.0-citysample.patch`) | Walker navigation dead on an unbuilt `RecastNavMesh` |
+| 7 | [#9871](https://github.com/carla-simulator/carla/issues/9871) | **Still open / present** (avoided by synthesising sidewalk strips) | `get_random_location_from_navigation()` returns `None` forever |
+| 8 | [#9870](https://github.com/carla-simulator/carla/issues/9870) | **Still open / present** (installer deploys to `Content/Map/Nav/`) | The two navmesh lookups look in different places |
+| 9 | [#9869](https://github.com/carla-simulator/carla/issues/9869) | **Still open / present** (`roadnetwork_to_xodr.py` offsets junction IDs) | *OpenDRIVE parser ignores a link's elementType* ([comment](https://github.com/carla-simulator/carla/issues/9869#issuecomment-6076656971)) |
+| 10 | *not yet filed* | **New in `1.0` port** (patched in `RayTracer.cpp`) | `URayTracer::CastRay` / `ProjectPoint` dereference `*Hit.GetComponent()` without a null check — crashes on non-UObject physics bodies (`FastGeoStreaming`) |
+| 11 | *not yet filed* | **New in `1.0` port** (patched in `RayCastSemanticLidar.cpp`, `HSSLidar.cpp`, `Radar.cpp`) | Attached ray-cast sensors hit their parent ego vehicle because `Owner` is attached after `BeginPlay` initializes `TraceParams` |
+| 12 | *not yet filed* | **New in `1.0` port** (documented in `CarlaMassBridge`) | Traffic Manager `ALSM` (`ALSM.cpp:323`) queries every `vehicle.*` actor without checking `ActorState::Dormant` |
 
 Background: [#9852](https://github.com/carla-simulator/carla/issues/9852).
 
