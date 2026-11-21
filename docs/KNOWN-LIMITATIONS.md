@@ -1,112 +1,82 @@
-# Known Limitations & Technical Caveats (`v1.1.0`)
+# Known Limitations & Technical Caveats
 
-Every limitation listed here was measured on the running CARLA `1.0` server
-(`Small_City_LVL` and `Big_City_LVL`), not inferred. Upstream CARLA defects
-found during integration are documented with minimal reproducers in
-[ISSUES-TO-FILE.md](../ISSUES-TO-FILE.md); stage-by-stage design notes live in
-[IMPLEMENTATION-PLAN.md](IMPLEMENTATION-PLAN.md).
+Every caveat and measurement listed here was verified on the running CARLA `1.0`
+server (`Small_City_LVL` and `Big_City_LVL`), not inferred. Upstream CARLA bugs
+and pull requests are tracked in [ISSUES-TO-FILE.md](../ISSUES-TO-FILE.md);
+stage-by-stage design notes live in [IMPLEMENTATION-PLAN.md](IMPLEMENTATION-PLAN.md).
 
 ---
 
-## 1. Active Runtime & Map Caveats
+## 1. Remaining Architectural Caveats
 
-### 1.1 First semantic segmentation capture after server start
-While World Partition is still streaming initial cells after server launch,
-newly loaded `FastGeoStreaming` primitives briefly carry City Sample's own
-material-variation values in custom primitive data float 5 before the tagger
-sweeps them. CARLA's segmentation shader reads that float as a class ID (`> 29`).
-- **Impact**: An immediate post-boot capture contains out-of-range label IDs.
-  `tools/segmentation_census.py` detects `R > 29` and refuses to report a bogus
-  percentage.
-- **Mitigation**: Let the world settle (~25 s) and take a second capture. From
-  the second run onward, `Unlabeled` settles at **`0.2 %`** on `Small_City_LVL`
-  and **`0.4 %`** on `Big_City_LVL` (`0.00 %` out of range), and completed
-  `UFastGeoContainer` objects stay cached via `FObjectKey`.
+### 1.1 World Partition streaming horizon & initial cell streaming
+City Sample streams building, prop, and road geometry around active World
+Partition streaming sources (`role_name="hero"` / `ego_vehicle` and the CARLA
+spectator pawn, defaulting to `carla.Streaming.HeroRadiusCm` /
+`world_settings.tile_stream_distance`).
+- **Semantic segmentation during initial streaming**: Distant or not-yet-streamed
+  World Partition HLOD proxies (`AWorldPartitionHLOD` and `FastGeoStreaming`
+  HLOD1 meshes) explicitly carry `CityObjectLabel::None` (`0`, `Unlabeled`)
+  rather than invalid class IDs (`0.00 %` `R > 29` from the very first run;
+  `tools/segmentation_census.py` also waits for UE's `GTMaterial` post-process
+  PSO to finish compiling on cold boot). While initial cells around `hero` are
+  still streaming in, `Unlabeled` starts high on `Big_City_LVL` and settles at
+  **`0.0 %–0.2 %`** on `Small_City_LVL` and **`0.4 %`** on `Big_City_LVL` once
+  nearby cells load (~20–25 s).
+- **Ray-cast queries outside streamed cells**: Calling `world.cast_ray()` or
+  `ground_projection()` at coordinates beyond the active streaming radius hits
+  unloaded space (or a flat fallback). Move `hero` or the spectator to the target
+  area and tick briefly before querying distant coordinates.
 
-### 1.2 Speed limits and yield signs are inferred from ZoneGraph metadata
-Epic's City Sample drives traffic off ZoneGraph lane tags and authors traffic
-light data assets, but does not place speed-limit or yield sign actors.
-- **How it is handled**:
-  - `zonegraph_to_roadnetwork.py` and `roadnetwork_to_xodr.py` assign road-class
-    `<speed>` limits from ZoneGraph tags: `90 km/h` (`Trunk` freeway),
-    `80 km/h` (`Freeway`), `60 km/h` (ramps), and `50 / 40 / 30 km/h` across
-    urban density tiers.
-  - `add_signals_to_xodr.py` emits curbside US MUTCD `traffic.speed_limit.*`
-    signs (`274`, `country="US"`) with `<signalReference>` across parallel lanes
-    so `USpeedLimitComponent` trigger boxes update `vehicle.get_speed_limit()`
-    live, plus curbside `traffic.yield` signs (`205`) at unsignalised freeway/ramp
-    merges, acute slip lanes, and minor-to-major T-junction stems.
-- **Caveat**: Because these limits and yield priorities are derived heuristically
-  from road class and junction geometry rather than painted street signs in Epic's
-  art assets, visual City Sample street props may not always show a matching sign
-  mesh at the exact same spot (though CARLA spawns its own `BP_SpeedLimit*` and
-  yield sign actors on the curb).
-
-### 1.3 Mass ECS traffic is read-only and one-way aware
+### 1.2 Mass ECS proxies are read-only and bounded around `hero`
 City Sample's ambient vehicles and crowd run in Epic's **Mass ECS**, not as
-standard UE `AActor`s. When `-ExecCmds "carla.MassBridge.Enable 1"` is passed:
-- **Window, not whole-city census**: `CarlaMassBridge` mirrors up to `150`
-  vehicles (`carla.MassBridge.MaxProxies`) and `100` pedestrians
-  (`carla.MassBridge.MaxWalkers`) nearest `role_name="hero"` (or nearest the
-  spectator when no `hero` exists; `carla.MassBridge.FollowHero`).
-- **Read-only proxies**: Proxies are registered in CARLA's dormant ID range
+standard UE `AActor`s:
+- **Spatial window**: When `-ExecCmds "carla.MassBridge.Enable 1"` is passed,
+  `CarlaMassBridge` mirrors up to `150` vehicles (`carla.MassBridge.MaxProxies`)
+  and `100` pedestrians (`carla.MassBridge.MaxWalkers`) nearest `role_name="hero"`
+  (or nearest the spectator when no `hero` exists; `carla.MassBridge.FollowHero`).
+- **Read-only control**: Proxies live in CARLA's dormant ID range
   (`>= 0x80000000`). Calling `apply_control()` or `set_autopilot()` on a `.mass.`
   actor does not steer Epic's Mass entity.
-- **Asymmetric yielding with CARLA Traffic Manager**: With the `ALSM.cpp` patch
-  ([carla#10366](https://github.com/carla-simulator/carla/issues/10366)),
-  CARLA's Traffic Manager safely coexists with `CarlaMassBridge` and yields to
-  mirrored Mass vehicles within `60 m`. However, Epic's Mass ECS vehicles do not
-  know about CARLA-spawned actors and will not brake for a CARLA vehicle stopped
-  in their lane. For purely CARLA-controlled traffic, leave `MassBridge` off and
-  disable `Auto Spawn On Begin Play` on the level's `BP_Mass*Spawner` actors
-  (keep `BP_MassTrafficIntersectionSpawner` enabled if you need visual traffic
-  light meshes).
+- **Two-way obstacle yielding & pure-CARLA traffic mode**:
+  - By default (`carla.MassBridge.ExportCarlaObstacles 1`), live CARLA vehicles
+    and walkers are published into Mass as `FMassTrafficObstacleTag` entities so
+    ambient MassTraffic vehicles brake to `0 km/h` behind CARLA actors, while
+    CARLA's Traffic Manager yields to nearby `.mass.` proxies ([carla#10366](https://github.com/carla-simulator/carla/issues/10366) / [PR #10369](https://github.com/carla-simulator/carla/pull/10369)).
+  - To run purely CARLA-controlled traffic or walkers without Epic's ambient
+    populations, pass `-ExecCmds "carla.MassBridge.DisableMassTraffic 1"` (and/or
+    `"carla.MassBridge.DisableMassCrowd 1"`), which despawns Mass vehicle/crowd
+    spawners while keeping intersection traffic-light visuals intact.
 
-### 1.4 One-lane-per-road OpenDRIVE topology (no automatic lane changes)
-Each ZoneGraph vehicle lane is exported as its own single-lane OpenDRIVE `<road>`
-with a `<laneOffset>` of half the lane width (`0.04 m` centreline accuracy, zero
-overlapping road meshes).
-- **Impact**: Because parallel lanes on a multi-lane avenue are separate OpenDRIVE
-  `<road>` elements rather than sibling `<lane>` elements under one reference
-  line, CARLA's `Waypoint.get_left_lane()` / `get_right_lane()` return `None`,
-  and Traffic Manager vehicles stay in their chosen lane between junctions rather
-  than making mid-block lane changes.
+### 1.3 Speed-limit and yield signs vs. City Sample visual street props
+Epic's City Sample drives traffic off ZoneGraph lane tags and authors traffic
+light data assets, but does not place 3D speed-limit or yield sign props in its
+street art.
+- `zonegraph_to_roadnetwork.py`, `roadnetwork_to_xodr.py`, and
+  `add_signals_to_xodr.py` derive road-class `<speed>` limits (`30–90 km/h`) and
+  spawn functional CARLA `traffic.speed_limit.*` (`274`, `country="US"`) and
+  `traffic.yield` (`205`) sign actors on the curb (`0` poles inside driving
+  lanes), so `vehicle.get_speed_limit()` and Traffic Manager obey them even where
+  Epic's static environment art had no painted sign mesh.
 
-### 1.5 `map.get_crosswalks()` lateral offset vs. navmesh crosswalks
-CARLA's `Map::GetAllCrosswalkZones()` evaluates `<object type="crosswalk">`
-outlines from lane `0` *after* applying `<laneOffset>` rather than from the raw
-OpenDRIVE reference line. On single-lane roads with a half-lane `<laneOffset>`
-(`1.75 m`), `world.get_map().get_crosswalks()` returns polygon coordinates shifted
-by half a lane width along the crossing axis.
-- **Impact**: Affects callers of `map.get_crosswalks()` only. `xodr_to_recast_obj.py`
-  evaluates the OpenDRIVE reference line directly, so pedestrian navmesh
-  crosswalk tiles align with the painted crossings.
-
-### 1.6 Ray-cast queries beyond the World Partition streaming radius
-City Sample streams building and road meshes around active streaming sources
-(the spectator and `role_name="hero"`, defaulting to `carla.Streaming.HeroRadiusCm`
-/ `world_settings.tile_stream_distance`).
-- **Impact**: Calling `world.cast_ray()` or `ground_projection()` at coordinates
-  outside the currently streamed radius hits unloaded space (or a flat `z = 0`
-  fallback). Move the spectator or `hero` vehicle to the target area (and tick
-  briefly in synchronous mode) before querying distant locations.
-
-### 1.7 `Integrate-CarlaIntoCitySample.ps1 -Undo` scope
-Running `tools\Integrate-CarlaIntoCitySample.ps1 -Undo` removes all copied
-plugins, the `Content\Carla` junction, deployed `.xodr` / `.bin` map files, and
-restores all backed-up `.uproject` / `.ini` / `.Target.cs` files inside the City
-Sample project:
-- Pass `-Undo -RevertCarlaPatch` to also reverse `patches/carla-1.0-citysample.patch`
-  inside `$CARLA_DIR` (left untouched by default in case `$CARLA_DIR` is shared).
-- The Windows `HKCU:\Software\Epic Games\Unreal Engine\Builds` registration entry
-  for your CARLA UE 5.8 engine fork stays registered unless removed manually.
+### 1.4 Split, merge, and junction lanes stay single-lane `<road>`s
+`zonegraph_to_roadnetwork.py` groups co-parallel same-direction non-junction
+vehicle lanes (matching vertex counts within `15 cm` of lateral offset and
+compatible endpoints) into multi-lane OpenDRIVE `<road>`s (`236` multi-lane
+roads / `23,536` lane-change waypoints on `Small_City_LVL`; `1,312` multi-lane
+roads / `158,358` lane-change waypoints on `Big_City_LVL`), enabling native
+`Waypoint.get_left_lane()` / `get_right_lane()` and Traffic Manager mid-block
+lane changes.
+- Diverging ramp tapers, turn-pocket flares (`> 15 cm` lateral divergence), and
+  junction connecting roads intentionally remain 1-lane `<road>` elements so
+  adjacent road meshes never overlap (`--single-lane-roads` restores legacy
+  1-lane-per-road export across the entire map if desired).
 
 ---
 
 ## 2. Implementation Traps & Engineering Notes
 
-If you modify the C++ plugins or Python converters, keep these hard-won
-invariants in mind:
+If you modify the C++ plugins or Python converters, keep these invariants in mind:
 
 1. **Edit `plugins/CarlaMassBridge/` or `$CARLA_DIR`, never `<CitySample>/Plugins/`**:
    The City Sample project holds copies overwritten by `Integrate-CarlaIntoCitySample.ps1`.
@@ -117,15 +87,18 @@ invariants in mind:
    pointer can never match.
 3. **Never call `MarkRenderStateDirty(true)` on a `FFastGeoPrimitiveComponent`**:
    Forcing proxy recreation while `ProxyState == Creating` triggers an engine
-   assertion (`FastGeoPrimitiveComponent.cpp:331`). Writing floats 4 and 5 of
-   custom primitive data (`SetCustomPrimitiveDataVector4(4, ...)`) before proxy
-   creation is picked up automatically when the render proxy initializes.
-4. **OpenDRIVE junction IDs must be disjoint from road IDs**: CARLA's
+   assertion (`FastGeoPrimitiveComponent.cpp:331`). `SetCustomPrimitiveData`
+   marks render state dirty safely without forcing mid-creation proxy teardown.
+4. **Mutate `FMassEntityManager` outside Mass processing scopes**: Synchronous
+   `CreateEntity` / `DestroyEntity` calls assert `!EntityManager.IsProcessing()`.
+   `UCarlaMassBridgeSubsystem::Tick` syncs CARLA obstacle entities on the game
+   thread outside Mass processor execution and guards `IsProcessing()`.
+5. **OpenDRIVE junction IDs must be disjoint from road IDs**: CARLA's
    `RoadParser` ignores `elementType="junction"` on road `<link>` elements whenever
    a `<road>` shares the same numeric `id` ([carla#9869](https://github.com/carla-simulator/carla/issues/9869)).
    `roadnetwork_to_xodr.py` offsets all junction IDs above the maximum road ID
    and `--selftest` enforces this.
-5. **Pedestrian navmesh path & client ticking**:
+6. **Pedestrian navmesh path & client ticking**:
    - CARLA's client fetches `Content/Map/Nav/<MapName>.bin` (not `Saved/Nav/`)
      for existing UE levels ([carla#9870](https://github.com/carla-simulator/carla/issues/9870)).
    - Detour crowd simulation runs in the **Python client** inside `world.tick()` /
@@ -134,15 +107,17 @@ invariants in mind:
 
 ---
 
-## 3. Summary of Previously Known Gaps Resolved Through `v1.1.0`
+## 3. Previously Known Limitations Now Resolved
 
-| Previously broken / missing | Resolution in `v1.0.0` – `v1.1.0` | Verification tool |
+| Previously broken / limited | Resolution | Verification tool |
 |---|---|---|
-| Ray-cast sensors (LiDAR, radar, `cast_ray`) returned 0 hits | Added dedicated collision channels 8–10 (`SensorObject`, `SensorTrace`, `OverlapChannel`) & ego-ignore ([carla#10365](https://github.com/carla-simulator/carla/issues/10365)) | `tools/verify_sensors.py` |
-| `URayTracer` crashed on `FastGeoStreaming` hits (`Hit.GetComponent() == nullptr`) | Null-safe `Hit.GetComponent()` handling + FastGeo physics hit resolver ([carla#10364](https://github.com/carla-simulator/carla/issues/10364)) | `tools/verify_sensors.py` |
-| Camera segmentation `98.8 %` `Unlabeled` & `Sky` (`6.9 %` on `Big_City_LVL`) `Unlabeled` | `CarlaFastGeoTagger` enabled by default (`carla.FastGeoTagger.Enable = 1`) + `ATagger` dot-boundary fix (`SM_dome.SM_dome` -> `Sky` `11`): `0.2 %` / `0.4 %` `Unlabeled` | `tools/segmentation_census.py` |
-| Semantic LiDAR `99.1 %` -> `3.3 %` `Unlabeled` | FastGeo hit-label resolver + expanded `ATagger` rules (`Underpass` -> `Bridge`, `Map/Environment` -> `Terrain`): `1.26 %` `Unlabeled` on both maps | `tools/verify_sensors.py` |
-| No traffic lights, stop signs, yield signs, or speed limits (fixed `30 km/h`) | Harvested `.uasset` lights (`355` / `2,176`) + curbside stop (`193` / `2,107`), yield (`2` / `7`), and US MUTCD speed-limit signs (`197` / `1,356`, `30–90 km/h`, `0` poles in lanes) | `tools/carla_traffic_lights.py` |
+| Ray-cast sensors (LiDAR, radar, `cast_ray`) returned 0 hits or ego self-hits | Named collision channels 8–10 (`SensorObject`, `SensorTrace`, `OverlapChannel`) & `GetOwner()` ignore ([carla#10365](https://github.com/carla-simulator/carla/issues/10365), [PR #10371](https://github.com/carla-simulator/carla/pull/10371)) | `tools/verify_sensors.py` |
+| `URayTracer` crashed on `FastGeoStreaming` hits (`Hit.GetComponent() == nullptr`) | Null-safe `ATagger::GetTagOfHit` + FastGeo physics hit resolver ([carla#10364](https://github.com/carla-simulator/carla/issues/10364), [PR #10370](https://github.com/carla-simulator/carla/pull/10370)) | `tools/verify_sensors.py` |
+| First-run segmentation `R > 29` (`INVALID` class IDs) & `98.8 %` `Unlabeled` | `CarlaFastGeoTagger` + `ATagger` clear HLOD `CustomPrimitiveData[4..5]` to `0`, `SM_dome` -> `Sky` (`11`), `GTMaterial` PSO warmup: **`0.00 %` `R > 29` on Run 1**, **`0.0 %–0.2 %` / `0.4 %`** settled `Unlabeled` | `tools/segmentation_census.py` |
+| Semantic LiDAR `99.1 %` -> `3.3 %` `Unlabeled` | FastGeo hit-label resolver + expanded `ATagger` rules (`Underpass` -> `Bridge`, `Map/Environment` -> `Terrain`): **`1.26 %` `Unlabeled`** on both maps | `tools/verify_sensors.py` |
+| No traffic lights, stop signs, yield signs, or speed limits (fixed `30 km/h`) | Harvested `.uasset` lights (`355` / `2,176`) + curbside stop (`193` / `2,109`), yield (`2` / `7`), and US MUTCD speed-limit signs (`197` / `1,357`, `30–90 km/h`, `0` poles in lanes) | `tools/carla_traffic_lights.py` |
+| One-lane-per-road OpenDRIVE (`get_left_lane()` / `get_right_lane()` returned `None`, no lane changes) | Co-parallel same-direction lanes grouped into `236` / `1,312` multi-lane `<road>`s (`23,536` / `158,358` lane-change waypoints, `0` junction dead ends, live TM mid-block lane changes) | `tools/zonegraph_to_roadnetwork.py` |
+| `map.get_crosswalks()` shifted by `1.75 m` (`<laneOffset>`) | `Map::GetAllCrosswalkZones()` evaluates `GetDirectedPointInNoLaneOffset` + `ApplyLateralOffset(-t)`: **`0.0000 m` median error** across `1,096` / `8,310` crosswalks ([carla#10367](https://github.com/carla-simulator/carla/issues/10367), [PR #10368](https://github.com/carla-simulator/carla/pull/10368)) | `tools/roadnetwork_to_xodr.py` |
+| Asymmetric Mass / CARLA yielding & editor-only Mass traffic disable | `ExportCarlaObstacles=1` publishes CARLA actors as `FMassTrafficObstacleTag` entities (Mass brakes `50.2 -> 0.0 km/h` behind `hero`) + `DisableMassTraffic` / `DisableMassCrowd` CVars + `ALSM.cpp` fix ([carla#10366](https://github.com/carla-simulator/carla/issues/10366), [PR #10369](https://github.com/carla-simulator/carla/pull/10369)) | `tools/carla_mass_bridge.py --test-yielding` |
 | Synthesised `2.5 m` sidewalk approximations | `xodr_to_recast_obj.py --zonegraph` meshes Epic's `7,846` / `59,384` authored pedestrian lanes (`1` connected island, `30/30` walkers moving) | `tools/carla_walkers.py` |
-| `CarlaMassBridge` spectator-only & incompatible with Traffic Manager | `FollowHero` (`role_name="hero"`) + `ALSM.cpp` dormant-actor fix ([carla#10366](https://github.com/carla-simulator/carla/issues/10366)) | `tools/carla_mass_bridge.py` |
-| `Big_City_LVL` unexported (`17` untagged sidewalk lanes leaked into roads) | Propagated lane types across ZoneGraph links; full `23,594`-road, `1,197.5 km` export & runtime validation | `tools/Run-CarlaCity.ps1 -Map Big_City_LVL` |
+| `Integrate-CarlaIntoCitySample.ps1 -Undo` left CARLA patch & HKCU engine entry | Added `-RevertCarlaPatch` and `-RemoveEngineRegistration` switches to `-Undo` | `tools/Integrate-CarlaIntoCitySample.ps1` |

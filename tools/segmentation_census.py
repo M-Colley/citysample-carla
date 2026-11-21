@@ -67,6 +67,8 @@ def main() -> int:
     ego, cam = None, None
     try:
         ego_bp = bl.filter("vehicle.*")[0]
+        if ego_bp.has_attribute("role_name"):
+            ego_bp.set_attribute("role_name", "hero")
         for sp in spawns:
             ego = world.try_spawn_actor(ego_bp, sp)
             if ego:
@@ -77,27 +79,53 @@ def main() -> int:
         print(f"ego: {ego.type_id} at "
               f"({ego.get_location().x:.0f}, {ego.get_location().y:.0f})")
 
-        print(f"\nletting the world stream in for {args.settle:.0f}s "
-              "(the number is meaningless before this settles)")
-        deadline = time.time() + args.settle
-        while time.time() < deadline:
-            world.wait_for_tick()
-
+        # Spawn the segmentation camera before the settle window so UE's
+        # GTMaterial post-process PSO compiles during warmup rather than
+        # returning an un-post-processed lit RGB frame on capture #0.
         cam_bp = bl.find("sensor.camera.semantic_segmentation")
         cam_bp.set_attribute("image_size_x", "800")
         cam_bp.set_attribute("image_size_y", "600")
-        images = queue.Queue()
+        images: queue.Queue = queue.Queue()
         cam = world.spawn_actor(
             cam_bp,
             carla.Transform(carla.Location(x=1.5, z=2.4)),
             attach_to=ego)
         cam.listen(images.put)
 
-        try:
-            image = images.get(timeout=30.0)
-        except queue.Empty:
-            print("no segmentation frame arrived in 30s")
-            return 1
+        print(f"\nletting the world stream in for {args.settle:.0f}s "
+              "(warming GTMaterial PSO and streaming FastGeo cells around hero)")
+        t_start = time.time()
+        settle_deadline = t_start + args.settle
+        pso_deadline = t_start + max(args.settle, 35.0)
+        pso_ready = False
+        latest_valid = None
+        while time.time() < pso_deadline:
+            world.wait_for_tick()
+            frame = None
+            while not images.empty():
+                try:
+                    frame = images.get_nowait()
+                except queue.Empty:
+                    break
+            if frame is not None:
+                # Sample stride 32 (~375 pixels) to detect when UE finishes
+                # compiling GTMaterial's post-process PSO on the first run.
+                sample = memoryview(frame.raw_data)[2::128]
+                if all(v <= 29 for v in sample):
+                    if not pso_ready:
+                        pso_ready = True
+                    latest_valid = frame
+            if time.time() >= settle_deadline and pso_ready:
+                break
+
+        if latest_valid is not None and time.time() >= settle_deadline:
+            image = latest_valid
+        else:
+            try:
+                image = images.get(timeout=30.0)
+            except queue.Empty:
+                print("no segmentation frame arrived in 30s")
+                return 1
 
         # Raw BGRA; the label is the red channel.
         hist = collections.Counter(bytes(image.raw_data)[2::4])

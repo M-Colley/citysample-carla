@@ -208,22 +208,265 @@ def extract_crosswalks(lanes: list) -> list:
     return out
 
 
-def convert(doc: dict, *, keep_sidewalks: bool = False) -> dict:
-    """One OpenDRIVE road per ZoneGraph lane.
+def _unit_planar_tangent(pts: list[dict], i: int) -> tuple[float, float]:
+    """Unit XY tangent in Unreal space at vertex `i`."""
+    t = pts[i].get("tangent")
+    if t and (abs(t[0]) > 1e-9 or abs(t[1]) > 1e-9):
+        tx, ty = float(t[0]), float(t[1])
+    else:
+        pa = pts[max(i - 1, 0)]["pos"]
+        pb = pts[min(i + 1, len(pts) - 1)]["pos"]
+        tx, ty = float(pb[0] - pa[0]), float(pb[1] - pa[1])
+    n = math.hypot(tx, ty)
+    return (tx / n, ty / n) if n > 1e-9 else (1.0, 0.0)
 
-    Earlier this emitted one road per lane GROUP, using a representative lane's
-    centreline as the reference line and hanging left/right lanes off it. That
-    road then spanned across its neighbours' territory, so adjacent groups'
-    generated meshes overlapped - and a vehicle spawned into two overlapping
-    meshes is physically stuck. Roughly half of all spawn points were unusable.
 
-    ZoneGraph lanes do not overlap each other, so emitting one road per lane
-    tiles the surface exactly. It also makes longitudinal links trivial and
-    exact: the lane -> road mapping is 1:1, so an Outgoing link resolves
-    directly to a successor road.
+def _parallel_chain_geometry_ok(lane_by_idx: dict[int, dict], chain: list[int],
+                                max_err_cm: float = 15.0) -> bool:
+    """Verify that hanging `chain[1:]` as right sibling lanes off `chain[0]`'s
+    reference line (with `laneOffset = +0.5 * w_0`) places every lane centre
+    within `max_err_cm` of its authored ZoneGraph polyline at every vertex."""
+    if len(chain) <= 1:
+        return True
+    ref = lane_by_idx[chain[0]]
+    ref_pts = ref["points"]
+    n_pts = len(ref_pts)
+    widths = [float(lane_by_idx[idx].get("width_cm", 350.0)) for idx in chain]
+    ref_tans = [_unit_planar_tangent(ref_pts, k) for k in range(n_pts)]
+    cos_min = math.cos(math.radians(4.0))
 
-    The cost is that parallel lanes are no longer one multi-lane road, so CARLA
-    sees no lane-change relationship between them. Correct geometry first.
+    cum_right_cm = 0.5 * widths[0]
+    for m in range(1, len(chain)):
+        ln = lane_by_idx[chain[m]]
+        pts = ln["points"]
+        if len(pts) != n_pts:
+            return False
+        offset_cm = cum_right_cm + 0.5 * widths[m]
+        for k in range(n_pts):
+            ux, uy = ref_tans[k]
+            mux, muy = _unit_planar_tangent(pts, k)
+            if ux * mux + uy * muy < cos_min:
+                return False
+            # Unreal is left-handed (+X forward, +Y right), so right normal is (-uy, +ux).
+            p0 = ref_pts[k]["pos"]
+            pm = pts[k]["pos"]
+            ex = p0[0] + offset_cm * (-uy)
+            ey = p0[1] + offset_cm * ux
+            if math.hypot(pm[0] - ex, pm[1] - ey, pm[2] - p0[2]) > max_err_cm:
+                return False
+        cum_right_cm += widths[m]
+    return True
+
+
+def _build_parallel_chains(lanes: list[dict], emitted: set[int],
+                           lane_to_junction: dict[int, str],
+                           ltypes: dict[int, str]) -> list[list[int]]:
+    """Build ordered Left -> Right chains of co-parallel same-direction lanes
+    outside junctions, refined to fixed-point endpoint compatibility so every
+    multi-lane `<road>` has unambiguous OpenDRIVE road/lane links."""
+    lane_by_idx = {ln["index"]: ln for ln in lanes if ln["index"] in emitted}
+
+    def can_pair(left_idx: int, right_idx: int) -> bool:
+        if left_idx == right_idx:
+            return False
+        if left_idx in lane_to_junction or right_idx in lane_to_junction:
+            return False
+        if ltypes.get(left_idx) != "driving" or ltypes.get(right_idx) != "driving":
+            return False
+        a, b = lane_by_idx[left_idx], lane_by_idx[right_idx]
+        ta, tb = a.get("tags", []), b.get("tags", [])
+        if (road_type_name(ta) != road_type_name(tb)
+                or road_speed_kmh(ta) != road_speed_kmh(tb)
+                or ("Freeway" in ta) != ("Freeway" in tb)):
+            return False
+        if len(a["points"]) != len(b["points"]):
+            return False
+        return _parallel_chain_geometry_ok(lane_by_idx, [left_idx, right_idx])
+
+    right_nbr: dict[int, int] = {}
+    left_nbr: dict[int, int] = {}
+    bad_flags = {"OppositeDirection", "Splitting", "Merging"}
+
+    for idx in sorted(lane_by_idx):
+        ln = lane_by_idx[idx]
+        r_cands = [
+            lk["dest"] for lk in ln.get("links", [])
+            if lk.get("type") == "Adjacent"
+            and "Right" in lk.get("flags", ())
+            and not (bad_flags & set(lk.get("flags", ())))
+            and lk.get("dest") in lane_by_idx
+        ]
+        if len(r_cands) != 1:
+            continue
+        r_idx = r_cands[0]
+        # Require reciprocal Left link on r_idx with no splitting/merging/opposite flags.
+        l_cands = [
+            lk["dest"] for lk in lane_by_idx[r_idx].get("links", [])
+            if lk.get("type") == "Adjacent"
+            and "Left" in lk.get("flags", ())
+            and not (bad_flags & set(lk.get("flags", ())))
+            and lk.get("dest") in lane_by_idx
+        ]
+        if l_cands == [idx] and can_pair(idx, r_idx):
+            right_nbr[idx] = r_idx
+            left_nbr[r_idx] = idx
+
+    chains: list[list[int]] = []
+    visited: set[int] = set()
+    for ln in lanes:
+        idx = ln["index"]
+        if idx not in lane_by_idx or idx in visited:
+            continue
+        if idx in left_nbr:
+            continue  # Wait until we hit the leftmost head of this chain (unless cyclic).
+        cur = [idx]
+        visited.add(idx)
+        nxt = right_nbr.get(idx)
+        while nxt is not None and nxt not in visited:
+            if _parallel_chain_geometry_ok(lane_by_idx, cur + [nxt]):
+                cur.append(nxt)
+                visited.add(nxt)
+                nxt = right_nbr.get(nxt)
+            else:
+                break
+        chains.append(cur)
+
+    for ln in lanes:
+        idx = ln["index"]
+        if idx in lane_by_idx and idx not in visited:
+            chains.append([idx])
+            visited.add(idx)
+
+    # Iteratively split any multi-lane chain whose lanes do not share the same
+    # longitudinal road/junction predecessor and successor.
+    while True:
+        chain_of: dict[int, int] = {}
+        pos_in_chain: dict[int, int] = {}
+        for ci, ch in enumerate(chains):
+            for pos, lidx in enumerate(ch):
+                chain_of[lidx] = ci
+                pos_in_chain[lidx] = pos
+
+        def end_signature(ci: int, lidx: int, link_type: str):
+            targets = []
+            for lk in lane_by_idx[lidx].get("links", []):
+                if lk.get("type") != link_type:
+                    continue
+                dest = lk.get("dest")
+                if dest not in lane_by_idx:
+                    continue
+                dj = lane_to_junction.get(dest)
+                if dj:
+                    targets.append(("junction", dj, 0))
+                else:
+                    dci = chain_of[dest]
+                    if dci == ci:
+                        # Self-loop onto same chain cannot be represented on one road.
+                        return ("SELF", lidx)
+                    targets.append(("road", dci, pos_in_chain[dest]))
+            if not targets:
+                return ("NONE", None)
+            juncs = {t[1] for t in targets if t[0] == "junction"}
+            roads_t = [(t[1], t[2]) for t in targets if t[0] == "road"]
+            if juncs and not roads_t and len(juncs) == 1:
+                return ("JUNCTION", next(iter(juncs)))
+            if len(roads_t) == 1 and not juncs:
+                return ("ROAD", roads_t[0][0], roads_t[0][1])
+            # Ambiguous / fork outside junction: isolate this lane so it never
+            # corrupts a neighbour's multi-lane road link.
+            return ("ISOLATE", lidx)
+
+        new_chains: list[list[int]] = []
+        changed = False
+        for ci, ch in enumerate(chains):
+            if len(ch) <= 1:
+                new_chains.append(ch)
+                continue
+
+            # Partition contiguous runs of `ch` that share compatible (out, in) road/junction targets
+            # AND target distinct lanes when linking road-to-road.
+            runs: list[list[int]] = []
+            cur_run: list[int] = []
+            cur_key = None
+            used_out_lanes: set[int] = set()
+            used_in_lanes: set[int] = set()
+
+            for lidx in ch:
+                osig = end_signature(ci, lidx, "Outgoing")
+                isig = end_signature(ci, lidx, "Incoming")
+                if osig[0] in ("SELF", "ISOLATE") or isig[0] in ("SELF", "ISOLATE"):
+                    if cur_run:
+                        runs.append(cur_run)
+                        cur_run = []
+                        cur_key = None
+                    runs.append([lidx])
+                    continue
+
+                okey = (osig[0], osig[1])
+                ikey = (isig[0], isig[1])
+                out_lane = osig[2] if osig[0] == "ROAD" else None
+                in_lane = isig[2] if isig[0] == "ROAD" else None
+
+                conflict = (
+                    cur_key is not None and (
+                        (okey, ikey) != cur_key
+                        or (out_lane is not None and out_lane in used_out_lanes)
+                        or (in_lane is not None and in_lane in used_in_lanes)
+                    )
+                )
+                if conflict:
+                    runs.append(cur_run)
+                    cur_run = []
+                    used_out_lanes = set()
+                    used_in_lanes = set()
+
+                if not cur_run:
+                    cur_key = (okey, ikey)
+                    used_out_lanes = set()
+                    used_in_lanes = set()
+                cur_run.append(lidx)
+                if out_lane is not None:
+                    used_out_lanes.add(out_lane)
+                if in_lane is not None:
+                    used_in_lanes.add(in_lane)
+
+            if cur_run:
+                runs.append(cur_run)
+
+            if len(runs) > 1:
+                changed = True
+                for r in runs:
+                    # Re-verify geometry whenever chain head changes (r[0] != ch[0]).
+                    if len(r) <= 1 or _parallel_chain_geometry_ok(lane_by_idx, r):
+                        new_chains.append(r)
+                    else:
+                        for single in r:
+                            new_chains.append([single])
+            else:
+                new_chains.append(ch)
+
+        chains = new_chains
+        if not changed:
+            break
+
+    # Preserve deterministic ordering by first lane's appearance in `lanes`.
+    order_of = {ln["index"]: pos for pos, ln in enumerate(lanes)}
+    chains.sort(key=lambda ch: order_of[ch[0]])
+    return chains
+
+
+def convert(doc: dict, *, keep_sidewalks: bool = False,
+            single_lane_roads: bool = False) -> dict:
+    """Convert ZoneGraph lanes into OpenDRIVE-ready roads, junctions, and crosswalks.
+
+    Co-parallel same-direction non-intersection vehicle lanes (`Adjacent` Left/Right
+    with no `OppositeDirection`, `Splitting`, or `Merging`, matching vertex counts
+    within 15 cm of lateral offset, and compatible endpoints) are grouped into
+    multi-lane unidirectional `<road>` records (`lane_count = k`, `lane_widths_cm`,
+    `lane_offset_cm = 0.5 * w_0`) so CARLA's `Waypoint.get_left_lane()` /
+    `get_right_lane()` and Traffic Manager lane changes work natively without
+    introducing overlapping opposite-direction or gore-area road meshes.
+    Pass `single_lane_roads=True` (`--single-lane-roads`) for 1-lane-per-road mode.
     """
     roads: list[dict] = []
     junctions: list[dict] = []
@@ -265,6 +508,7 @@ def convert(doc: dict, *, keep_sidewalks: bool = False) -> dict:
         # Pedestrian Intersection lanes from creating empty junctions or pulling
         # adjacent lanes into them.
         emitted_lanes = [ln for ln in lanes if ln["index"] in emitted]
+        lane_by_idx = {ln["index"]: ln for ln in emitted_lanes}
         lane_to_junction: dict[int, str] = {}
         for gi, group in enumerate(group_lanes(emitted_lanes)):
             members = [emitted_lanes[i] for i in group]
@@ -273,87 +517,108 @@ def convert(doc: dict, *, keep_sidewalks: bool = False) -> dict:
                 for m in members:
                     lane_to_junction[m["index"]] = jid
 
-        def road_id(idx: int) -> str | None:
-            return f"{prefix}_l{idx}" if idx in emitted else None
+        if single_lane_roads:
+            chains = [[ln["index"]] for ln in emitted_lanes]
+        else:
+            chains = _build_parallel_chains(lanes, emitted, lane_to_junction, ltypes)
+
+        # Every emitted lane maps to (road_id, odr_lane_id), where odr_lane_id is
+        # -1 for single-lane roads and -1..-k (left to right) for grouped roads.
+        lane_map: dict[int, tuple[str, int]] = {}
+        for ch in chains:
+            rid = f"{prefix}_l{ch[0]}"
+            for pos, lidx in enumerate(ch):
+                lane_map[lidx] = (rid, -(pos + 1))
 
         used_junctions: set[str] = set()
-        for ln in lanes:
-            idx = ln["index"]
-            if idx not in emitted:
-                continue
-            tags = ln.get("tags", [])
-            jid = lane_to_junction.get(idx)
+        for ch in chains:
+            head_idx = ch[0]
+            head_ln = lane_by_idx[head_idx]
+            rid = f"{prefix}_l{head_idx}"
+            tags = head_ln.get("tags", [])
+            jid = lane_to_junction.get(head_idx)
+            n_lanes = len(ch)
+            if n_lanes > 1:
+                stats["multilane_roads"] += 1
+                stats["grouped_parallel_lanes"] += n_lanes
 
-            # Longitudinal links. OpenDRIVE allows one predecessor and one
-            # successor per road, and the first link is kept. A fork INTO a
-            # junction loses nothing by that - every branch resolves to the same
-            # junction, which holds them all as connecting roads. A fork between
-            # plain roads has no junction to hold it, so its other branches are
-            # unreachable in CARLA; those are counted, not guessed at.
             succ = pred = None
-            succ_targets = set()
-            for lk in ln.get("links", []):
-                t = lk.get("type")
-                if t not in ("Outgoing", "Incoming"):
-                    continue
-                dest = lk.get("dest")
-                dr = road_id(dest)
-                if not dr:
-                    stats["unresolved_links"] += 1
-                    continue
-                dj = lane_to_junction.get(dest)
-                if dj and dj != jid:
-                    cand = {"type": "junction", "id": dj}
-                else:
-                    # Arriving at the successor's start / leaving from the
-                    # predecessor's end.
-                    cand = {"type": "road", "id": dr,
-                            "contact": "start" if t == "Outgoing" else "end"}
-                if t == "Outgoing":
-                    succ_targets.add((cand["type"], cand["id"]))
-                    if succ is None:
-                        succ = cand
-                elif t == "Incoming" and pred is None:
-                    pred = cand
-            if len(succ_targets) > 1:
-                stats["forks_outside_junctions"] += 1
+            lane_succ_ids: list[int | None] = [None] * n_lanes
+            lane_pred_ids: list[int | None] = [None] * n_lanes
+
+            for pos, lidx in enumerate(ch):
+                ln = lane_by_idx[lidx]
+                succ_targets = set()
+                for lk in ln.get("links", []):
+                    t = lk.get("type")
+                    if t not in ("Outgoing", "Incoming"):
+                        continue
+                    dest = lk.get("dest")
+                    if dest not in lane_map:
+                        stats["unresolved_links"] += 1
+                        continue
+                    dest_rid, dest_lane_id = lane_map[dest]
+                    dj = lane_to_junction.get(dest)
+                    if dj and dj != jid:
+                        cand = {"type": "junction", "id": dj}
+                        cand_lane = None
+                    else:
+                        cand = {"type": "road", "id": dest_rid,
+                                "contact": "start" if t == "Outgoing" else "end"}
+                        cand_lane = dest_lane_id
+
+                    if t == "Outgoing":
+                        succ_targets.add((cand["type"], cand["id"]))
+                        if succ is None:
+                            succ = cand
+                        if lane_succ_ids[pos] is None and cand["type"] == "road" and cand["id"] == succ["id"]:
+                            lane_succ_ids[pos] = cand_lane
+                    elif t == "Incoming":
+                        if pred is None:
+                            pred = cand
+                        if lane_pred_ids[pos] is None and cand["type"] == "road" and cand["id"] == pred["id"]:
+                            lane_pred_ids[pos] = cand_lane
+
+                if len(succ_targets) > 1:
+                    stats["forks_outside_junctions"] += 1
+
             if succ is None and pred is None:
                 stats["roads_without_links"] += 1
             if succ is None:
-                # Where the SOURCE network ends a lane. Vehicles that reach
-                # one in CARLA are destroyed, so this is the number to compare
-                # with roadnetwork_to_xodr.py's "dead ends" line: anything
-                # there beyond this count was introduced by the conversion.
                 stats["roads_without_successor"] += 1
 
-            width = float(ln.get("width_cm", 350.0))
-            roads.append({
-                "id": f"{prefix}_l{idx}",
+            widths = [float(lane_by_idx[lidx].get("width_cm", 350.0)) for lidx in ch]
+            width0 = widths[0]
+            road_rec = {
+                "id": rid,
                 "points": [{"pos": p["pos"], "tangent": p.get("tangent", [0, 0, 0])}
-                           for p in ln["points"]],
-                "lane_width_cm": width,
-                # One directed lane, emitted on the right. laneOffset then puts
-                # that lane's CENTRE on the ZoneGraph centreline instead of half
-                # a lane to the side of it.
+                           for p in head_ln["points"]],
+                "lane_width_cm": width0,
+                "lane_widths_cm": widths,
+                # Directed right-hand lane(s) -1..-k. laneOffset = +w_0/2 places
+                # lane -1's centre on the leftmost ZoneGraph lane's centreline, and
+                # lanes -2..-k tile immediately to its right.
                 "unidirectional": True,
-                "lane_count": 1,
-                "lane_offset_cm": width / 2.0,
+                "lane_count": n_lanes,
+                "lane_offset_cm": width0 / 2.0,
+                "lane_succ_ids": lane_succ_ids,
+                "lane_pred_ids": lane_pred_ids,
                 "is_freeway": "Freeway" in tags,
                 "road_type": road_type_name(tags),
                 "speed_kmh": road_speed_kmh(tags),
-                "lane_type": ltypes[idx],
+                "lane_type": ltypes[head_idx],
                 "tags": tags,
                 **({"junction": jid} if jid else {}),
                 **({"successor": succ} if succ else {}),
                 **({"predecessor": pred} if pred else {}),
-            })
+            }
+            roads.append(road_rec)
             stats["connecting_roads" if jid else "roads"] += 1
             if jid:
                 used_junctions.add(jid)
 
-        # Junction records, with connections resolved lane-by-lane. Lanes are
-        # grouped by junction once, in lane order, rather than every junction
-        # rescanning every lane.
+        # Junction records, with connections resolved from each incoming road's
+        # specific lane id (-1..-k) into the connecting road's lane -1.
         junction_lanes: dict[str, list[dict]] = defaultdict(list)
         for ln in lanes:
             jid = lane_to_junction.get(ln["index"])
@@ -361,22 +626,27 @@ def convert(doc: dict, *, keep_sidewalks: bool = False) -> dict:
                 junction_lanes[jid].append(ln)
         for jid in sorted(used_junctions):
             conns = []
+            seen_pairs: set[tuple[str, str]] = set()
             centre = None
             for ln in junction_lanes[jid]:
                 idx = ln["index"]
+                conn_rid = lane_map[idx][0]
                 if centre is None and ln.get("points"):
                     centre = ln["points"][0]["pos"]
                 for lk in ln.get("links", []):
                     if lk.get("type") != "Incoming":
                         continue
-                    inc = road_id(lk.get("dest"))
-                    if inc and lane_to_junction.get(lk.get("dest")) != jid:
-                        conns.append({
-                            "incoming": inc,
-                            "connecting": f"{prefix}_l{idx}",
-                            "contact": "start",
-                            "lane_links": [[-1, -1]],
-                        })
+                    src = lk.get("dest")
+                    if src in lane_map and lane_to_junction.get(src) != jid:
+                        inc_rid, inc_lane_id = lane_map[src]
+                        if (inc_rid, conn_rid) not in seen_pairs:
+                            seen_pairs.add((inc_rid, conn_rid))
+                            conns.append({
+                                "incoming": inc_rid,
+                                "connecting": conn_rid,
+                                "contact": "start",
+                                "lane_links": [[inc_lane_id, -1]],
+                            })
             junctions.append({"id": jid, "center": centre or [0, 0, 0],
                               "connections": conns})
             if not conns:
@@ -510,14 +780,73 @@ def selftest() -> int:
         road_speed_kmh(["City", "Vehicle", "Vehicle Density 0"])) != (90.0, 60.0, 50.0, 30.0):
         fails.append("road_speed_kmh mapping mismatch")
 
+    # Co-parallel same-direction lanes (Left -> Right, no OppositeDirection /
+    # Splitting / Merging) must group into one multi-lane road with exact
+    # per-lane widths, junction lane_links [-1,-1]/[-2,-1], and connecting
+    # road successor lane ids [-1]/[-2].
+    ml_doc = {
+        "source": "selftest-multilane",
+        "zone_graphs": [{
+            "actor": "zg",
+            "lanes": [
+                # 2-lane approach (lane 0 left 350 cm at y=0, lane 1 right 400 cm at y=+375 cm)
+                {"index": 0, "width_cm": 350.0, "tags": ["Vehicle"],
+                 "points": [{"pos": [0, 0, 0], "tangent": [1, 0, 0]},
+                            {"pos": [2000, 0, 0], "tangent": [1, 0, 0]}],
+                 "links": [{"dest": 1, "type": "Adjacent", "flags": ["Right"]},
+                           {"dest": 2, "type": "Outgoing", "flags": []}]},
+                {"index": 1, "width_cm": 400.0, "tags": ["Vehicle"],
+                 "points": [{"pos": [0, 375, 0], "tangent": [1, 0, 0]},
+                            {"pos": [2000, 375, 0], "tangent": [1, 0, 0]}],
+                 "links": [{"dest": 0, "type": "Adjacent", "flags": ["Left"]},
+                           {"dest": 3, "type": "Outgoing", "flags": []}]},
+                # 2 connecting lanes inside the junction
+                {"index": 2, "width_cm": 350.0, "tags": ["Vehicle", "Intersection"],
+                 "points": [{"pos": [2000, 0, 0], "tangent": [1, 0, 0]},
+                            {"pos": [3000, 0, 0], "tangent": [1, 0, 0]}],
+                 "links": [{"dest": 0, "type": "Incoming", "flags": []},
+                           {"dest": 4, "type": "Outgoing", "flags": []},
+                           {"dest": 3, "type": "Adjacent", "flags": ["Right"]}]},
+                {"index": 3, "width_cm": 400.0, "tags": ["Vehicle", "Intersection"],
+                 "points": [{"pos": [2000, 375, 0], "tangent": [1, 0, 0]},
+                            {"pos": [3000, 375, 0], "tangent": [1, 0, 0]}],
+                 "links": [{"dest": 1, "type": "Incoming", "flags": []},
+                           {"dest": 5, "type": "Outgoing", "flags": []},
+                           {"dest": 2, "type": "Adjacent", "flags": ["Left"]}]},
+                # 2-lane exit road
+                {"index": 4, "width_cm": 350.0, "tags": ["Vehicle"],
+                 "points": [{"pos": [3000, 0, 0], "tangent": [1, 0, 0]},
+                            {"pos": [5000, 0, 0], "tangent": [1, 0, 0]}],
+                 "links": [{"dest": 5, "type": "Adjacent", "flags": ["Right"]},
+                           {"dest": 2, "type": "Incoming", "flags": []}]},
+                {"index": 5, "width_cm": 400.0, "tags": ["Vehicle"],
+                 "points": [{"pos": [3000, 375, 0], "tangent": [1, 0, 0]},
+                            {"pos": [5000, 375, 0], "tangent": [1, 0, 0]}],
+                 "links": [{"dest": 4, "type": "Adjacent", "flags": ["Left"]},
+                           {"dest": 3, "type": "Incoming", "flags": []}]},
+            ],
+        }],
+    }
+    ml = convert(ml_doc)
+    ml_by_id = {r["id"]: r for r in ml["roads"]}
+    if sorted(ml_by_id) != ["zg_l0", "zg_l2", "zg_l3", "zg_l4"]:
+        fails.append(f"multilane expected ['zg_l0', 'zg_l2', 'zg_l3', 'zg_l4'], got {sorted(ml_by_id)}")
+    else:
+        if ml_by_id["zg_l0"]["lane_count"] != 2 or ml_by_id["zg_l0"]["lane_widths_cm"] != [350.0, 400.0]:
+            fails.append(f"zg_l0 expected 2 lanes [350, 400], got {ml_by_id['zg_l0']}")
+        if ml_by_id["zg_l2"]["lane_pred_ids"] != [-1] or ml_by_id["zg_l2"]["lane_succ_ids"] != [-1]:
+            fails.append(f"zg_l2 expected pred [-1] succ [-1], got {ml_by_id['zg_l2']}")
+        if ml_by_id["zg_l3"]["lane_pred_ids"] != [-2] or ml_by_id["zg_l3"]["lane_succ_ids"] != [-2]:
+            fails.append(f"zg_l3 expected pred [-2] succ [-2], got {ml_by_id['zg_l3']}")
+
     if fails:
         print("SELFTEST FAILED")
         for f in fails:
             print("  -", f)
         return 1
-    print(f"selftest passed - {len(out['roads'])} roads (one per lane), "
-          f"{len(out['junctions'])} junction, links resolve, lane offset correct, "
-          f"sidewalk dropped")
+    print(f"selftest passed - opposite-direction lanes separated, parallel lanes grouped "
+          f"({ml['_stats'].get('multilane_roads', 0)} multi-lane roads), "
+          f"links resolve, sidewalk dropped")
     return 0
 
 
@@ -527,6 +856,8 @@ def main() -> int:
     ap.add_argument("-o", "--output", default="roadnetwork.json")
     ap.add_argument("--keep-sidewalks", action="store_true",
                     help="emit pedestrian-only lane groups as roads too")
+    ap.add_argument("--single-lane-roads", action="store_true",
+                    help="emit one OpenDRIVE road per ZoneGraph lane without parallel grouping")
     ap.add_argument("--selftest", action="store_true")
     args = ap.parse_args()
 
@@ -537,7 +868,8 @@ def main() -> int:
 
     doc = load_json_any(args.input)
 
-    out = convert(doc, keep_sidewalks=args.keep_sidewalks)
+    out = convert(doc, keep_sidewalks=args.keep_sidewalks,
+                  single_lane_roads=args.single_lane_roads)
     with open(args.output, "w", encoding="utf-8") as fh:
         json.dump(out, fh, indent=1)
 

@@ -39,10 +39,10 @@ namespace
            "  1: on (default)"),
       ECVF_Default);
 
-  /// Shortest gap between sweeps. Small enough that newly streamed geometry is
-  /// correct well within one frame of arriving at 20 Hz, large enough that the
-  /// sweep is not the thing setting the frame rate.
-  constexpr double kSweepIntervalSeconds = 0.25;
+  /// Shortest gap between sweeps. With CompletedContainers keyed on FObjectKey,
+  /// steady-state sweeps skip already-verified containers in < 0.05 ms while
+  /// tagging newly streamed cells within one 20 Hz frame.
+  constexpr double kSweepIntervalSeconds = 0.05;
 
   /// Where CARLA keeps the label in custom primitive data.
   ///
@@ -144,12 +144,16 @@ void UCarlaFastGeoTaggerSubsystem::Initialize(FSubsystemCollectionBase &Collecti
 
         // Streaming updates stop firing once the world settles, but containers
         // keep arriving for a while after that - and the very first cells load
-        // before this subsystem exists. A slow repeating timer closes both gaps
-        // without making the streaming hook any hotter.
+        // before this subsystem exists. Run an immediate pass plus a 10 Hz timer.
         World->GetTimerManager().SetTimer(
             SweepTimerHandle, this,
             &UCarlaFastGeoTaggerSubsystem::OnStreamingStateUpdated,
-            0.5f, true, 0.5f);
+            0.1f, true, 0.05f);
+
+        if (CVarFastGeoTagger.GetValueOnGameThread() != 0)
+        {
+            TagFastGeoGeometry();
+        }
     }
 
     // Teach CARLA's ray-casting sensors how to label FastGeo geometry. Without
@@ -300,15 +304,20 @@ int32 UCarlaFastGeoTaggerSubsystem::TagFastGeoGeometry()
             {
                 continue;
             }
+            FFastGeoPrimitiveComponent *Prim =
+                static_cast<FFastGeoPrimitiveComponent *>(PrimitiveComponent);
+
             // CastTo<> tests FFastGeoElementType::IsA, so the Base type matches
-            // both the plain and the instanced concrete classes.
+            // both plain and instanced static mesh components. Non-static or
+            // unmatched FastGeo primitives (including HLOD1 proxies) still MUST
+            // have CustomPrimitiveData[4..5] cleared if City Sample populated
+            // material-variation floats there, or SegmentationSensor.usf reads
+            // float 5 as an invalid class ID (> 29).
+            crp::CityObjectLabel Label = crp::CityObjectLabel::None;
             FFastGeoStaticMeshComponentBase *FastGeoComponent =
-                static_cast<FFastGeoPrimitiveComponent *>(PrimitiveComponent)
-                    ->CastTo<FFastGeoStaticMeshComponentBase>();
+                Prim->CastTo<FFastGeoStaticMeshComponentBase>();
             if (FastGeoComponent == nullptr)
             {
-                FFastGeoPrimitiveComponent *Prim =
-                    static_cast<FFastGeoPrimitiveComponent *>(PrimitiveComponent);
                 if (Prim->CastTo<FFastGeoSkinnedMeshComponentBase>() != nullptr)
                 {
                     ++SkippedSkinned;
@@ -317,53 +326,63 @@ int32 UCarlaFastGeoTaggerSubsystem::TagFastGeoGeometry()
                 {
                     ++SkippedOther;
                 }
-                continue;
-            }
-            ++Seen;
-            ++ContainerSeen;
-
-            const UStaticMesh *Mesh = FastGeoComponent->GetStaticMesh();
-            if (Mesh == nullptr)
-            {
-                continue;
-            }
-
-            const FObjectKey MeshKey(Mesh);
-            crp::CityObjectLabel Label;
-            if (const uint8 *Known = MeshLabels.Find(MeshKey))
-            {
-                Label = static_cast<crp::CityObjectLabel>(*Known);
             }
             else
             {
-                const FString AssetPath = Mesh->GetPathName();
-                Label = ATagger::GetLabelByAssetPath(AssetPath);
-                MeshLabels.Add(MeshKey, static_cast<uint8>(Label));
+                ++Seen;
+                ++ContainerSeen;
+
+                if (const UStaticMesh *Mesh = FastGeoComponent->GetStaticMesh())
+                {
+                    const FObjectKey MeshKey(Mesh);
+                    if (const uint8 *Known = MeshLabels.Find(MeshKey))
+                    {
+                        Label = static_cast<crp::CityObjectLabel>(*Known);
+                    }
+                    else
+                    {
+                        const FString AssetPath = Mesh->GetPathName();
+                        Label = ATagger::GetLabelByAssetPath(AssetPath);
+                        MeshLabels.Add(MeshKey, static_cast<uint8>(Label));
+                        if (Label == crp::CityObjectLabel::None)
+                        {
+                            ReportUnmatchedFastGeo(AssetPath);
+                        }
+                    }
+                }
                 if (Label == crp::CityObjectLabel::None)
                 {
-                    ReportUnmatchedFastGeo(AssetPath);
+                    ++Unmatched;
+                    ++ContainerUnmatched;
                 }
             }
-            if (Label == crp::CityObjectLabel::None)
+
+            const float TargetLabel = static_cast<float>(Label);
+            const FCustomPrimitiveData &Existing =
+                FFastGeoCustomDataAccess::Read(*Prim);
+
+            // When Label == None and CustomPrimitiveData does not reach slot 4/5,
+            // UE already supplies 0.0f to the shader without allocating or dirtying.
+            if (Label == crp::CityObjectLabel::None &&
+                Existing.Data.Num() <= kCarlaLabelFloatIndex)
             {
-                ++Unmatched;
-                ++ContainerUnmatched;
                 continue;
             }
 
-            const FCustomPrimitiveData &Existing =
-                FFastGeoCustomDataAccess::Read(*FastGeoComponent);
-
             if (Existing.Data.Num() >= kRequiredFloats &&
-                Existing.Data[kCarlaLabelFloatIndex + 1] == static_cast<float>(Label))
+                Existing.Data[kCarlaLabelFloatIndex + 0] == 0.0f &&
+                Existing.Data[kCarlaLabelFloatIndex + 1] == TargetLabel)
             {
-                if (!FastGeoComponent->IsRenderStateCreated())
+                if (!Prim->IsRenderStateCreated())
                 {
                     ++Deferred;
                     ++ContainerDeferred;
                 }
-                ++AlreadyTagged;
-                ++ContainerAlready;
+                if (Label != crp::CityObjectLabel::None)
+                {
+                    ++AlreadyTagged;
+                    ++ContainerAlready;
+                }
                 continue;
             }
 
@@ -372,18 +391,21 @@ int32 UCarlaFastGeoTaggerSubsystem::TagFastGeoGeometry()
             {
                 Data.SetNumZeroed(kRequiredFloats);
             }
-            Data[kCarlaLabelFloatIndex + 0] = 0.0f;                       // actor id
-            Data[kCarlaLabelFloatIndex + 1] = static_cast<float>(Label);  // label
-            FastGeoComponent->SetCustomPrimitiveData(Data);
+            Data[kCarlaLabelFloatIndex + 0] = 0.0f;         // actor id
+            Data[kCarlaLabelFloatIndex + 1] = TargetLabel;  // label (0.0f when None)
+            Prim->SetCustomPrimitiveData(Data);
 
             // DO NOT force MarkRenderStateDirty(true) here: see FastGeoPrimitiveComponent.cpp:331.
-            if (!FastGeoComponent->IsRenderStateCreated())
+            if (!Prim->IsRenderStateCreated())
             {
                 ++Deferred;
                 ++ContainerDeferred;
             }
-            ++NewlyTagged;
-            ++ContainerNewlyTagged;
+            if (Label != crp::CityObjectLabel::None)
+            {
+                ++NewlyTagged;
+                ++ContainerNewlyTagged;
+            }
         }
 
         if (ContainerNewlyTagged == 0 && ContainerDeferred == 0)

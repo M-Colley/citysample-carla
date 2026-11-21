@@ -261,20 +261,20 @@ def pick_curbside_host(members: list[Approach], ref_hdg: float | None = None) ->
         s_pos = max(0.0, a.length - STOPLINE_SETBACK_M)
         rx, ry, _ = road_point_at_s(a.road, s_pos)
         # Signed projection onto left normal (-sin hdg, +cos hdg): most negative is rightmost.
-        return -rx * sin_h + ry * cos_h + (a.lane_offset - a.n_lanes * a.lane_width)
+        return -rx * sin_h + ry * cos_h + (a.lane_offset - a.right_width)
 
     return min(members, key=signed_left_t)
 
 
 def clear_curb_pose(host: Approach, surface_grid: RoadSurfaceGrid | None,
-                    min_margin: float = 0.8, max_extra_m: float = 24.0) -> tuple[float, float]:
+                    min_margin: float = 0.8, max_extra_m: float = 42.0) -> tuple[float, float]:
     """Return `(s_pos, t)` on `host` that places the pole off every driving lane.
 
     Tries the standard 2 m stop-line setback first (marching rightward past any
     parallel/slip lane), then steps slightly further back from skewed corners
     where an acute cross-street flares over the 2 m mark."""
     s_default = max(0.0, host.length - STOPLINE_SETBACK_M)
-    t_base = host.lane_offset - host.n_lanes * host.lane_width - POLE_CLEAR_M
+    t_base = host.lane_offset - host.right_width - POLE_CLEAR_M
     if surface_grid is None:
         return (s_default, t_base)
 
@@ -285,7 +285,7 @@ def clear_curb_pose(host: Approach, surface_grid: RoadSurfaceGrid | None,
     if best_clear >= min_margin:
         return best_pose
 
-    setbacks = [STOPLINE_SETBACK_M, 4.0, 6.0, 8.0, 10.0, 14.0]
+    setbacks = [STOPLINE_SETBACK_M, 4.0, 6.0, 8.0, 10.0, 14.0, 18.0, 24.0]
     for back in setbacks:
         if host.length > 1.0 and back > host.length - 0.5 and back > STOPLINE_SETBACK_M:
             s_cand = 0.5
@@ -321,10 +321,10 @@ class Approach:
     """One road arriving at a junction, at whichever end links to it."""
 
     __slots__ = ("road", "road_id", "junction", "at_end", "x", "y", "hdg",
-                 "length", "n_lanes", "lane_offset", "lane_width")
+                 "length", "n_lanes", "lane_offset", "lane_width", "right_width")
 
     def __init__(self, road, road_id, junction, at_end, x, y, hdg,
-                 length, n_lanes, lane_offset, lane_width):
+                 length, n_lanes, lane_offset, lane_width, right_width=None):
         self.road = road
         self.road_id = road_id
         self.junction = junction
@@ -334,6 +334,7 @@ class Approach:
         self.n_lanes = n_lanes
         self.lane_offset = lane_offset
         self.lane_width = lane_width
+        self.right_width = (n_lanes * lane_width) if right_width is None else right_width
 
 
 def collect_approaches(root: ET.Element) -> list[Approach]:
@@ -362,6 +363,7 @@ def collect_approaches(root: ET.Element) -> list[Approach]:
         widths = [float(l.find("width").get("a")) for l in driving
                   if l.find("width") is not None]
         lane_width = widths[0] if widths else 4.0
+        right_width = sum(widths) if widths else (len(driving) * lane_width)
         lo = road.find("lanes/laneOffset")
         lane_offset = float(lo.get("a")) if lo is not None else 0.0
 
@@ -370,7 +372,7 @@ def collect_approaches(root: ET.Element) -> list[Approach]:
             x, y, hdg = geom_end(geoms[-1])
             out.append(Approach(road, road.get("id"), succ.get("elementId"),
                                 True, x, y, hdg, length, len(driving),
-                                lane_offset, lane_width))
+                                lane_offset, lane_width, right_width))
     return out
 
 
@@ -569,13 +571,13 @@ def road_speed_info(road: ET.Element) -> tuple[str, int]:
     return (rtype, kmh)
 
 
-def clear_curb_pose_at_start(road: ET.Element, length: float, n_lanes: int,
-                             lane_offset: float, lane_width: float,
+def clear_curb_pose_at_start(road: ET.Element, length: float,
+                             lane_offset: float, right_width: float,
                              surface_grid: RoadSurfaceGrid | None,
                              min_margin: float = 0.8, max_extra_m: float = 42.0) -> tuple[float, float]:
     """Return `(s_pos, t)` near the start of `road` placing a speed-limit pole off every lane."""
     s_default = min(max(2.0, 0.25 * length), 6.0) if length < 16.0 else 6.0
-    t_base = lane_offset - n_lanes * lane_width - POLE_CLEAR_M
+    t_base = lane_offset - right_width - POLE_CLEAR_M
     if surface_grid is None:
         return (s_default, t_base)
 
@@ -743,7 +745,7 @@ def emit_stop_signs(root: ET.Element, approaches, signalised_junctions,
                 msig = mroad.find("signals")
                 if msig is None:
                     msig = ET.SubElement(mroad, "signals")
-                mt = m.lane_offset - m.n_lanes * m.lane_width - POLE_CLEAR_M
+                mt = m.lane_offset - m.right_width - POLE_CLEAR_M
                 ref = ET.SubElement(
                     msig, "signalReference",
                     s=f"{max(0.0, m.length - STOPLINE_SETBACK_M):.6f}",
@@ -823,6 +825,7 @@ def emit_speed_limits(root: ET.Element,
 
         widths = [float(l.find("width").get("a")) for l in driving if l.find("width") is not None]
         lane_width = widths[0] if widths else 4.0
+        right_width = sum(widths) if widths else (len(driving) * lane_width)
         lo = road.find("lanes/laneOffset")
         lane_offset = float(lo.get("a")) if lo is not None else 0.0
         s_ref = min(6.0, 0.35 * length)
@@ -834,6 +837,7 @@ def emit_speed_limits(root: ET.Element,
             "n_lanes": len(driving),
             "lane_offset": lane_offset,
             "lane_width": lane_width,
+            "right_width": right_width,
             "speed_kmh": snap_spd,
             "x": x0,
             "y": y0,
@@ -877,7 +881,7 @@ def emit_speed_limits(root: ET.Element,
         sin_h, cos_h = math.sin(g["hdg"]), math.cos(g["hdg"])
         host = min(
             g["members"],
-            key=lambda m: -m["x"] * sin_h + m["y"] * cos_h + (m["lane_offset"] - m["n_lanes"] * m["lane_width"]))
+            key=lambda m: -m["x"] * sin_h + m["y"] * cos_h + (m["lane_offset"] - m["right_width"]))
         g["host"] = host
         kmh = g["speed_kmh"]
 
@@ -890,8 +894,8 @@ def emit_speed_limits(root: ET.Element,
         if reuse_sid is None:
             sid = f"spd{host['road_id']}_{kmh}"
             s_pos, t = clear_curb_pose_at_start(
-                host["road"], host["length"], host["n_lanes"],
-                host["lane_offset"], host["lane_width"], surface_grid)
+                host["road"], host["length"],
+                host["lane_offset"], host["right_width"], surface_grid)
             signals = host["road"].find("signals")
             if signals is None:
                 signals = ET.SubElement(host["road"], "signals")
@@ -918,7 +922,7 @@ def emit_speed_limits(root: ET.Element,
             msig = m["road"].find("signals")
             if msig is None:
                 msig = ET.SubElement(m["road"], "signals")
-            mt = m["lane_offset"] - m["n_lanes"] * m["lane_width"] - POLE_CLEAR_M
+            mt = m["lane_offset"] - m["right_width"] - POLE_CLEAR_M
             ref = ET.SubElement(
                 msig, "signalReference",
                 s=f"{m['s_ref']:.6f}", t=f"{mt:.6f}",
@@ -981,7 +985,7 @@ def emit(root: ET.Element, by_junction, verbose=False,
                 msig = mroad.find("signals")
                 if msig is None:
                     msig = ET.SubElement(mroad, "signals")
-                mt = m.lane_offset - m.n_lanes * m.lane_width - POLE_CLEAR_M
+                mt = m.lane_offset - m.right_width - POLE_CLEAR_M
                 ref = ET.SubElement(
                     msig, "signalReference",
                     s=f"{max(0.0, m.length - STOPLINE_SETBACK_M):.6f}",

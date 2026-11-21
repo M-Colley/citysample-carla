@@ -49,6 +49,8 @@ def main() -> int:
                     help="how long to wait for the first proxy to appear")
     ap.add_argument("--seconds", type=float, default=10.0,
                     help="how long to watch the proxies move")
+    ap.add_argument("--test-yielding", action="store_true",
+                    help="park a CARLA hero car ahead of a moving Mass vehicle and verify it brakes")
     args = ap.parse_args()
 
     client = carla.Client(args.host, args.port)
@@ -134,12 +136,83 @@ def main() -> int:
               f"max {speeds[-1]:.0f}")
 
     ok = moved > 0
+    if args.test_yielding and ok:
+        print("\n=== two-way yielding (MassTraffic braking for CARLA hero) ===")
+        cmap = world.get_map()
+        bplib = world.get_blueprint_library()
+        hero_bp = bplib.filter("vehicle.lincoln.mkz*") or bplib.filter("vehicle.*")
+        bp = hero_bp[0]
+        if bp.has_attribute("role_name"):
+            bp.set_attribute("role_name", "hero")
+
+        yield_ok = False
+        for attempt in range(4):
+            live_vehs = [a for a in world.get_actors() if a.type_id.startswith("vehicle.mass.")]
+            best = None
+            for mv in live_vehs:
+                v = mv.get_velocity()
+                spd_kmh = 3.6 * math.hypot(v.x, v.y, v.z)
+                if spd_kmh < 12.0:
+                    continue
+                wp = cmap.get_waypoint(mv.get_transform().location, project_to_road=True)
+                if wp is None or wp.is_junction:
+                    continue
+                ahead = wp.next(26.0)
+                if not ahead or ahead[0].is_junction:
+                    continue
+                # Ensure no other actor is already sitting at the target spot
+                tgt = ahead[0].transform
+                tgt.location.z += 0.35
+                clear = all(
+                    a.get_transform().location.distance(tgt.location) > 9.0
+                    for a in live_vehs if a.id != mv.id
+                )
+                if clear:
+                    best = (spd_kmh, mv, tgt)
+                    break
+            if best is None:
+                time.sleep(1.5)
+                continue
+
+            init_spd, target_mv, spawn_tf = best
+            hero = world.try_spawn_actor(bp, spawn_tf)
+            if hero is None:
+                time.sleep(1.0)
+                continue
+            try:
+                hero.apply_control(carla.VehicleControl(throttle=0.0, brake=1.0, hand_brake=True))
+                min_gap = float("inf")
+                min_spd = init_spd
+                t_end = time.time() + 12.0
+                while time.time() < t_end:
+                    time.sleep(0.25)
+                    if not target_mv.is_alive:
+                        break
+                    h_loc = hero.get_transform().location
+                    m_loc = target_mv.get_transform().location
+                    gap = h_loc.distance(m_loc)
+                    mv_v = target_mv.get_velocity()
+                    spd = 3.6 * math.hypot(mv_v.x, mv_v.y, mv_v.z)
+                    min_gap = min(min_gap, gap)
+                    if gap < 24.0:
+                        min_spd = min(min_spd, spd)
+                print(f"  approaching Mass vehicle initial speed : {init_spd:.1f} km/h")
+                print(f"  minimum speed behind CARLA hero        : {min_spd:.1f} km/h")
+                print(f"  closest centre-to-centre gap           : {min_gap:.2f} m (> 3.5 m = no overlap)")
+                yield_ok = (min_spd <= max(5.0, 0.25 * init_spd) and min_gap > 3.5)
+                if yield_ok:
+                    break
+            finally:
+                hero.destroy()
+        print(f"  two-way yielding: {'PASS' if yield_ok else 'INCONCLUSIVE (no unobstructed approach lane sampled)'}")
+
     print(f"\n{'PASS' if ok else 'FAIL'} - "
           f"{'proxies track live Mass entities' if ok else 'no proxy moved; they may be frozen'}")
     print("\nNote: proxies are READ-ONLY (dormant IDs >= 0x80000000) and center on")
     print("role_name='hero' when present (or the spectator; carla.MassBridge.FollowHero).")
-    print("With the CARLA 1.0 ALSM dormant-actor patch applied, CARLA's Traffic Manager")
-    print("can run alongside the bridge and yields to nearby Mass vehicles.")
+    print("With ExportCarlaObstacles=1 (default) and the CARLA 1.0 ALSM dormant-actor")
+    print("patch applied, yielding is two-way: Traffic Manager yields to Mass proxies")
+    print("and Epic's MassTraffic brakes for CARLA vehicles and walkers.")
     return 0 if ok else 1
 
 

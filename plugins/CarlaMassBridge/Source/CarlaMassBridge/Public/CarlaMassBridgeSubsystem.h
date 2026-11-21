@@ -11,6 +11,7 @@
 // MassEntityTypes.h are deprecated stubs that compile out entirely at
 // IncludeOrderVersion.Latest, which this project uses.
 #include "Mass/EntityHandle.h"
+#include "MassArchetypeTypes.h"
 
 #include "CarlaMassBridgeSubsystem.generated.h"
 
@@ -55,13 +56,17 @@ public:
     virtual void Deinitialize() override;
     //~ End USubsystem
 
-    //~ Begin FTickableGameObject - the processor drives the sweep, not Tick.
-    virtual void Tick(float DeltaTime) override {}
+    //~ Begin FTickableGameObject
+    /// Game-thread tick outside Mass processing scopes: syncs live CARLA vehicles
+    /// and walkers into MassTraffic obstacle entities (`carla.MassBridge.ExportCarlaObstacles`)
+    /// so Epic's ambient Mass traffic brakes for CARLA actors, and applies runtime
+    /// `carla.MassBridge.DisableMassTraffic` / `DisableMassCrowd` toggles.
+    virtual void Tick(float DeltaTime) override;
     virtual TStatId GetStatId() const override
     {
         RETURN_QUICK_DECLARE_CYCLE_STAT(UCarlaMassBridgeSubsystem, STATGROUP_Tickables);
     }
-    virtual bool IsTickable() const override { return false; }
+    virtual bool IsTickable() const override;
     //~ End FTickableGameObject
 
     /// Where to measure "near" from, in world space.
@@ -98,12 +103,23 @@ public:
     void RemoveAllProxies();
 
     int32 NumProxies() const { return EntityToActorId.Num(); }
+    int32 NumExportedObstacles() const { return CarlaActorToObstacleEntity.Num(); }
 
 private:
     UCarlaEpisode *GetEpisode() const;
+    void SyncCarlaObstaclesToMass();
+    void RemoveAllObstacleEntities();
+    void ApplyMassPopulationToggles();
 
     /// Mass entity -> CARLA actor id.
     TMap<FMassEntityHandle, uint32> EntityToActorId;
+
+    /// Live CARLA actor id -> Mass obstacle entity (`FMassTrafficObstacleTag`).
+    TMap<uint32, FMassEntityHandle> CarlaActorToObstacleEntity;
+    FMassArchetypeHandle ObstacleArchetype;
+
+    bool bMassTrafficDisabledApplied = false;
+    bool bMassCrowdDisabledApplied = false;
 
     /// Last known pose, used to differentiate a velocity. MassTraffic vehicles
     /// have no FMassVelocityFragment, so there is nothing to read directly.

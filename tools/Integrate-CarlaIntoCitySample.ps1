@@ -66,7 +66,8 @@ param(
     [string] $BigCityNavMesh,
     [switch] $CheckOnly,
     [switch] $Undo,
-    [switch] $RevertCarlaPatch
+    [switch] $RevertCarlaPatch,
+    [switch] $RemoveEngineRegistration
 )
 
 $ErrorActionPreference = "Stop"
@@ -209,6 +210,21 @@ if ($Undo) {
                 }
             } finally {
                 $ErrorActionPreference = $prevEap
+            }
+        }
+    }
+    if ($RemoveEngineRegistration) {
+        $buildsKey = "HKCU:\Software\Epic Games\Unreal Engine\Builds"
+        if (Test-Path $buildsKey) {
+            $entries = @((Get-ItemProperty $buildsKey).PSObject.Properties |
+                         Where-Object { $_.Name -notlike "PS*" -and $_.Value -eq $EnginePath })
+            if ($entries.Count -gt 0) {
+                foreach ($entry in $entries) {
+                    Remove-ItemProperty -Path $buildsKey -Name $entry.Name -Force
+                    Ok "removed HKCU Unreal Engine registration $($entry.Name) -> $EnginePath"
+                }
+            } else {
+                Note "no HKCU Unreal Engine registration found for $EnginePath"
             }
         }
     }

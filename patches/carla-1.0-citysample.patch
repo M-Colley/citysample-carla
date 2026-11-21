@@ -1,3 +1,79 @@
+diff --git a/LibCarla/source/carla/road/Map.cpp b/LibCarla/source/carla/road/Map.cpp
+index 00a206f..fd46d97 100644
+--- a/LibCarla/source/carla/road/Map.cpp
++++ b/LibCarla/source/carla/road/Map.cpp
+@@ -533,51 +533,39 @@ namespace road {
+       std::vector<const RoadInfoCrosswalk *> crosswalks = road.GetInfos<RoadInfoCrosswalk>();
+       if (crosswalks.size() > 0) {
+         for (auto crosswalk : crosswalks) {
+-          // waypoint only at start position
+           std::vector<geom::Location> points;
+-          Waypoint waypoint;
+-          geom::Transform base;
+-          for (const auto &section : road.GetLaneSectionsAt(crosswalk->GetS())) {
+-            // get the section with the center lane
+-            for (const auto &lane : section.GetLanes()) {
+-              // is the center line
+-              if (lane.first == 0) {
+-                // get the center point
+-                waypoint.road_id = pair.first;
+-                waypoint.section_id = section.GetId();
+-                waypoint.lane_id = 0;
+-                waypoint.s = crosswalk->GetS();
+-                base = ComputeTransform(waypoint);
+-              }
+-            }
+-          }
++          // ASAM OpenDRIVE 1.4 places <object> records on the road reference line
++          // (before <laneOffset>), with lateral offset `t` perpendicular to `s`
++          // and relative orientation `hdg` applied at `(s, t)`. Evaluating lane 0
++          // via ComputeTransform() included <laneOffset>, shifting every crosswalk
++          // on offset roads by laneOffset, and rotating by `hdg` before applying `t`
++          // shifted projected crosswalks along `s` instead of across `t`.
++          const double s0 = crosswalk->GetS();
++          const double t0 = crosswalk->GetT();
++          element::DirectedPoint dp = road.GetDirectedPointInNoLaneOffset(s0);
++          dp.ApplyLateralOffset(static_cast<float>(-t0));
++          dp.location.z += static_cast<float>(road.GetLateralShapeZ(s0, t0));
++          dp.location.y *= -1.0f;
++          dp.tangent *= -1.0f;
++          geom::Rotation rot(
++              geom::Math::ToDegrees(static_cast<float>(dp.pitch)),
++              geom::Math::ToDegrees(static_cast<float>(dp.tangent)),
++              0.0f);
++          geom::Transform base(dp.location, rot);
+ 
+-          // The outline corners are given at height 0 above the road surface.
+-          // Placing them with the full centre-line transform at the crosswalk's
+-          // s applies that one point's pitch and roll to the whole outline, which
+-          // on a graded road tilts the slab about the pivot: the corners ahead of
+-          // it stand 10-60 cm proud of the asphalt and the ones behind it sink.
+           // Rotate the outline in the horizontal plane only and give every corner
+-          // the road's own elevation at that corner's s.
++          // the road's own elevation at that corner's s so graded roads do not tilt
++          // the crosswalk slab into or above the asphalt.
+           geom::Transform pivot = base;
+           pivot.rotation.pitch = 0.0f;
+           pivot.rotation.roll = 0.0f;
+           const float heading_deg =
+               geom::Math::ToDegrees<float>(static_cast<float>(crosswalk->GetHeading()));
+-
+-          // move perpendicular ('t')
+           pivot.rotation.yaw -= heading_deg;
+-          pivot.rotation.yaw -= 90;   // move perpendicular to 's' for the lateral offset
+-          geom::Vector3D v(static_cast<float>(crosswalk->GetT()), 0.0f, 0.0f);
+-          pivot.TransformPoint(v);
+-          // restore pivot position and orientation (yaw only)
+-          pivot.location = v;
+-          pivot.rotation.yaw += 90;
+ 
+           // s direction of the road at the crosswalk, in the horizontal plane
+           const geom::Vector3D forward =
+               geom::Rotation(0.0f, base.rotation.yaw, 0.0f).GetForwardVector();
+-          const double s0 = crosswalk->GetS();
+           const double road_length = road.GetLength();
+           const double z0 = road.GetElevationOn(s0).Evaluate(s0);
+ 
 diff --git a/LibCarla/source/carla/trafficmanager/ALSM.cpp b/LibCarla/source/carla/trafficmanager/ALSM.cpp
 index 25579b7..d4de499 100644
 --- a/LibCarla/source/carla/trafficmanager/ALSM.cpp
@@ -588,7 +664,7 @@ index 58383e2..82650e8 100644
  
    int PendingLevelsToLoad = 0;
 diff --git a/Unreal/CarlaUnreal/Plugins/Carla/Source/Carla/Game/Tagger.cpp b/Unreal/CarlaUnreal/Plugins/Carla/Source/Carla/Game/Tagger.cpp
-index 4d91377..7a52cba 100644
+index 4d91377..a297d12 100644
 --- a/Unreal/CarlaUnreal/Plugins/Carla/Source/Carla/Game/Tagger.cpp
 +++ b/Unreal/CarlaUnreal/Plugins/Carla/Source/Carla/Game/Tagger.cpp
 @@ -13,8 +13,13 @@
@@ -833,7 +909,7 @@ index 4d91377..7a52cba 100644
  void ATagger::SetStencilValue( UPrimitiveComponent &Component, const uint32 ActorID, const crp::CityObjectLabel &Label, const bool bSetRenderCustomDepth) 
  {
  
-@@ -127,8 +353,65 @@ static void ATagger_SetLabelTag(UPrimitiveComponent &Component, crp::CityObjectL
+@@ -127,8 +353,74 @@ static void ATagger_SetLabelTag(UPrimitiveComponent &Component, crp::CityObjectL
    Component.ComponentTags.Insert(FName(*ATagger::GetTagAsString(Label)), 0);
  }
  
@@ -874,12 +950,21 @@ index 4d91377..7a52cba 100644
  {
 +  ++GTaggerStats.Actors;
 +  // World Partition HLOD proxies merge many semantic classes into a single
-+  // mesh, so any one label is wrong at every silhouette boundary. Leaving
-+  // them untagged lets the semantic camera fall through to the real streamed
-+  // meshes behind them.
++  // mesh, so any one label is wrong at every silhouette boundary. When
++  // bTagHLODProxies is false, explicitly write CityObjectLabel::None (0) into
++  // CustomPrimitiveData[4..5] rather than returning untouched: City Sample
++  // bakes random material-variation floats into CustomPrimitiveData[0..15],
++  // which SegmentationSensor.usf otherwise reads as out-of-range class IDs (> 29).
 +  if (!ShouldTagHLODProxies() && Actor.IsA(AWorldPartitionHLOD::StaticClass()))
 +  {
 +    ++GTaggerStats.Skipped;
++    TArray<UPrimitiveComponent *> HLODComponents;
++    Actor.GetComponents<UPrimitiveComponent>(HLODComponents);
++    for (UPrimitiveComponent *Component : HLODComponents)
++    {
++      SetStencilValue(*Component, Actor.GetUniqueID(), crp::CityObjectLabel::None, bTagForSemanticSegmentation);
++      ATagger_SetLabelTag(*Component, crp::CityObjectLabel::None);
++    }
 +    return;
 +  }
 +
@@ -899,7 +984,7 @@ index 4d91377..7a52cba 100644
  #ifdef CARLA_TAGGER_EXTRA_LOG
    UE_LOG(LogCarla, Log, TEXT("Actor: %s"), *Actor.GetName());
  #endif // CARLA_TAGGER_EXTRA_LOG
-@@ -140,6 +423,14 @@ void ATagger::TagActor(const AActor &Actor, bool bTagForSemanticSegmentation)
+@@ -140,6 +432,14 @@ void ATagger::TagActor(const AActor &Actor, bool bTagForSemanticSegmentation)
    for (UStaticMeshComponent *Component : StaticMeshComponents) 
    {
      auto Label = GetLabelByPath(Component->GetStaticMesh());
@@ -914,7 +999,7 @@ index 4d91377..7a52cba 100644
      if (Label == crp::CityObjectLabel::Pedestrians && Cast<ACarlaWheeledVehicle>(&Actor))
      {
        Label = crp::CityObjectLabel::Rider;
-@@ -159,6 +450,14 @@ void ATagger::TagActor(const AActor &Actor, bool bTagForSemanticSegmentation)
+@@ -159,6 +459,14 @@ void ATagger::TagActor(const AActor &Actor, bool bTagForSemanticSegmentation)
  
    for (USkeletalMeshComponent *Component : SkeletalMeshComponents) {
      auto Label = GetLabelByPath(Component->GetPhysicsAsset());
@@ -929,7 +1014,7 @@ index 4d91377..7a52cba 100644
      if (Label == crp::CityObjectLabel::Pedestrians && Cast<ACarlaWheeledVehicle>(&Actor))
      {
        Label = crp::CityObjectLabel::Rider;
-@@ -176,17 +475,69 @@ void ATagger::TagActor(const AActor &Actor, bool bTagForSemanticSegmentation)
+@@ -176,17 +484,69 @@ void ATagger::TagActor(const AActor &Actor, bool bTagForSemanticSegmentation)
  
  void ATagger::TagActorsInLevel(UWorld &World, bool bTagForSemanticSegmentation)
  {
@@ -999,7 +1084,7 @@ index 4d91377..7a52cba 100644
  }
  
  crp::CityObjectLabel ATagger::GetTagFromName(const FName &Tag)
-@@ -218,6 +569,39 @@ crp::CityObjectLabel ATagger::GetTagOfTaggedComponent(const UPrimitiveComponent
+@@ -218,6 +578,39 @@ crp::CityObjectLabel ATagger::GetTagOfTaggedComponent(const UPrimitiveComponent
    return static_cast<crp::CityObjectLabel>(Component.CustomDepthStencilValue);
  }
  

@@ -128,6 +128,7 @@ class Road:
     elevations: list[tuple[float, float, float, float, float]] = field(default_factory=list)
     length: float = 0.0
     lane_width_m: float = 3.5
+    lane_widths_m: list[float] = field(default_factory=list)
     unidirectional: bool = False
     has_center_divider: bool = False
     is_freeway: bool = False
@@ -136,6 +137,8 @@ class Road:
     lane_count: int = 1
     predecessor: dict | None = None
     successor: dict | None = None
+    lane_succ_ids: list[int | None] = field(default_factory=list)
+    lane_pred_ids: list[int | None] = field(default_factory=list)
     junction: str | None = None
     lane_offset_m: float = 0.0
     lane_type: str = "driving"
@@ -194,18 +197,42 @@ def build_road(spec: dict, numeric_id: int) -> Road | None:
     if len(pts) < 2:
         return None
 
+    n_lanes = max(1, int(spec.get("lane_count", 1)))
+    base_w_m = float(spec.get("lane_width_cm", 350.0)) * CM_TO_M
+    raw_widths = spec.get("lane_widths_cm")
+    if isinstance(raw_widths, list) and len(raw_widths) == n_lanes:
+        lane_widths_m = [float(w) * CM_TO_M for w in raw_widths]
+    else:
+        lane_widths_m = [base_w_m] * n_lanes
+
+    raw_succ_ids = spec.get("lane_succ_ids")
+    lane_succ_ids = (
+        [int(x) if x is not None else None for x in raw_succ_ids]
+        if isinstance(raw_succ_ids, list) and len(raw_succ_ids) == n_lanes
+        else []
+    )
+    raw_pred_ids = spec.get("lane_pred_ids")
+    lane_pred_ids = (
+        [int(x) if x is not None else None for x in raw_pred_ids]
+        if isinstance(raw_pred_ids, list) and len(raw_pred_ids) == n_lanes
+        else []
+    )
+
     road = Road(
         rid=str(spec.get("id", f"road_{numeric_id}")),
         numeric_id=numeric_id,
-        lane_width_m=float(spec.get("lane_width_cm", 350.0)) * CM_TO_M,
+        lane_width_m=base_w_m,
+        lane_widths_m=lane_widths_m,
         unidirectional=bool(spec.get("unidirectional", False)),
         has_center_divider=bool(spec.get("has_center_divider", False)),
         is_freeway=bool(spec.get("is_freeway", False)),
         road_type=str(spec.get("road_type") or ("motorway" if spec.get("is_freeway") else "town")),
         speed_kmh=float(spec.get("speed_kmh", 80.0 if spec.get("is_freeway") else 30.0)),
-        lane_count=max(1, int(spec.get("lane_count", 1))),
+        lane_count=n_lanes,
         predecessor=spec.get("predecessor"),
         successor=spec.get("successor"),
+        lane_succ_ids=lane_succ_ids,
+        lane_pred_ids=lane_pred_ids,
         junction=spec.get("junction"),
         lane_offset_m=float(spec.get("lane_offset_cm", 0.0)) * CM_TO_M,
         # Pedestrian lanes (zonegraph_to_roadnetwork --keep-sidewalks) must be
@@ -261,7 +288,8 @@ def build_road(spec: dict, numeric_id: int) -> Road | None:
 
 
 def _lane(parent: ET.Element, lane_id: int, width_m: float, ltype: str = "driving",
-          link_succ: int | None = None, link_pred: int | None = None):
+          link_succ: int | None = None, link_pred: int | None = None,
+          mark_type: str = "broken", lane_change: str = "both"):
     """Emit one lane.
 
     link_succ / link_pred are LANE ids in the neighbouring road. Road-level
@@ -279,8 +307,8 @@ def _lane(parent: ET.Element, lane_id: int, width_m: float, ltype: str = "drivin
         ET.SubElement(link, "successor", id=str(link_succ))
     ET.SubElement(lane, "width", sOffset="0.0", a=f"{width_m:.6f}",
                   b="0.0", c="0.0", d="0.0")
-    ET.SubElement(lane, "roadMark", sOffset="0.0", type="broken", weight="standard",
-                  color="standard", width="0.15", laneChange="both")
+    ET.SubElement(lane, "roadMark", sOffset="0.0", type=mark_type, weight="standard",
+                  color="standard", width="0.15", laneChange=lane_change)
     return lane
 
 
@@ -568,24 +596,40 @@ def to_xodr(net: dict, name: str = "CitySample") -> ET.ElementTree:
         if not r.unidirectional:
             left = ET.SubElement(sec, "left")
             for i in range(n_side, 0, -1):
-                _lane(left, i, r.lane_width_m, r.lane_type)
+                is_outer = (i == n_side) or (r.lane_type != "driving")
+                w_m = r.lane_widths_m[i - 1] if i - 1 < len(r.lane_widths_m) else r.lane_width_m
+                _lane(left, i, w_m, r.lane_type,
+                      mark_type="solid" if is_outer else "broken",
+                      lane_change="none" if is_outer else "both")
 
         centre = ET.SubElement(sec, "center")
         c_lane = ET.SubElement(centre, "lane", id="0", type="none", level="false")
+        solid_centre = r.has_center_divider or r.unidirectional or r.lane_type != "driving"
         ET.SubElement(c_lane, "roadMark", sOffset="0.0",
-                      type="solid" if r.has_center_divider else "broken",
+                      type="solid" if solid_centre else "broken",
                       weight="standard", color="standard", width="0.15",
-                      laneChange="none" if r.has_center_divider else "both")
+                      laneChange="none" if solid_centre else "both")
 
         right = ET.SubElement(sec, "right")
         # Only a road-to-road link produces a lane-level link; a link into a
         # junction is resolved by that junction's <laneLink> entries.
-        succ_lane = -1 if (r.successor or {}).get("type") == "road" else None
-        pred_lane = -1 if (r.predecessor or {}).get("type") == "road" else None
+        succ_is_road = (r.successor or {}).get("type") == "road"
+        pred_is_road = (r.predecessor or {}).get("type") == "road"
         for i in range(1, n_side + 1):
-            _lane(right, -i, r.lane_width_m, r.lane_type,
-                  link_succ=succ_lane if i == 1 else None,
-                  link_pred=pred_lane if i == 1 else None)
+            w_m = r.lane_widths_m[i - 1] if i - 1 < len(r.lane_widths_m) else r.lane_width_m
+            if r.lane_succ_ids:
+                l_succ = r.lane_succ_ids[i - 1] if succ_is_road else None
+            else:
+                l_succ = -i if succ_is_road else None
+            if r.lane_pred_ids:
+                l_pred = r.lane_pred_ids[i - 1] if pred_is_road else None
+            else:
+                l_pred = -i if pred_is_road else None
+            is_outer = (i == n_side) or (r.lane_type != "driving")
+            _lane(right, -i, w_m, r.lane_type,
+                  link_succ=l_succ, link_pred=l_pred,
+                  mark_type="solid" if is_outer else "broken",
+                  lane_change="none" if is_outer else "both")
 
     n_cw, n_projected = emit_crosswalks(roads, net.get("crosswalks", []), road_elems)
     if n_cw:
@@ -611,25 +655,9 @@ def to_xodr(net: dict, name: str = "CitySample") -> ET.ElementTree:
     return ET.ElementTree(root)
 
 
-def carla_successors(root: ET.Element) -> dict[int, list[int]]:
-    """Successor roads of every road's lane -1, resolved the way LibCarla does.
-
-    Mirrors MapBuilder::GetLaneNext and GetJunctionLanes for what this tool
-    writes (one lane section, right-hand lanes only), quirks included:
-
-      * RoadParser keeps a link's elementId and drops its elementType, so
-        "is the successor a junction?" means "is there no ROAD with that id?";
-      * a missing <successor> parses as id 0;
-      * a road successor needs a lane-level <successor id> naming a lane the
-        next road has;
-      * a junction successor is every connecting road in it whose road-level
-        predecessor is this road and whose lane links back to this lane - or,
-        for CARLA's reverse-lane branch, whose successor is this road. The
-        junction's <connection incomingRoad> is never consulted.
-
-    An empty list is a dead end: the traffic manager destroys any vehicle whose
-    path buffer reaches one, and waypoint.next() returns [] there.
-    """
+def carla_lane_successors(root: ET.Element) -> dict[tuple[int, int], list[tuple[int, int]]]:
+    """Successor (road_id, lane_id) pairs of every right-hand lane, resolved
+    exactly as LibCarla's MapBuilder::GetLaneNext and GetJunctionLanes do."""
     roads = {int(r.get("id")): r for r in root.findall("road")}
     conns = {int(j.get("id")): [int(c.get("connectingRoad"))
                                 for c in j.findall("connection")]
@@ -639,25 +667,54 @@ def carla_successors(root: ET.Element) -> dict[int, list[int]]:
         e = road.find(f"link/{tag}")
         return int(e.get("elementId")) if e is not None else 0
 
-    def lane_link(road, tag):
-        """Lane -1's link id, 0 if absent, None if the road has no lane -1."""
-        for lane in road.findall("lanes/laneSection/right/lane"):
-            if lane.get("id") == "-1":
-                e = lane.find(f"link/{tag}")
-                return int(e.get("id")) if e is not None else 0
-        return None
+    right_lanes: dict[int, dict[int, ET.Element]] = {}
+    for rid, road in roads.items():
+        right_lanes[rid] = {
+            int(l.get("id")): l
+            for l in road.findall("lanes/laneSection/right/lane")
+        }
 
-    out = {}
+    def lane_link_id(lane_el: ET.Element, tag: str) -> int:
+        e = lane_el.find(f"link/{tag}")
+        return int(e.get("id")) if e is not None else 0
+
+    out: dict[tuple[int, int], list[tuple[int, int]]] = {}
     for rid, road in roads.items():
         nxt = link(road, "successor")
-        if nxt in roads:
-            ok = lane_link(road, "successor") == -1 and lane_link(roads[nxt], "predecessor") is not None
-            out[rid] = [nxt] if ok else []
-            continue
-        out[rid] = [c for c in conns.get(nxt, ()) if c in roads and (
-            (link(roads[c], "predecessor") == rid and lane_link(roads[c], "predecessor") == -1)
-            or (link(roads[c], "successor") == rid and lane_link(roads[c], "successor") == -1))]
+        for lid, lane_el in right_lanes[rid].items():
+            if nxt in roads:
+                target_lid = lane_link_id(lane_el, "successor")
+                if target_lid != 0 and target_lid in right_lanes[nxt]:
+                    out[(rid, lid)] = [(nxt, target_lid)]
+                else:
+                    out[(rid, lid)] = []
+                continue
+            j_opts: list[tuple[int, int]] = []
+            for c in conns.get(nxt, ()):
+                if c not in roads:
+                    continue
+                c_pred = link(roads[c], "predecessor")
+                c_succ = link(roads[c], "successor")
+                if c_pred == rid:
+                    for clid, cl_el in right_lanes[c].items():
+                        if lane_link_id(cl_el, "predecessor") == lid:
+                            j_opts.append((c, clid))
+                if c_succ == rid:
+                    for clid, cl_el in right_lanes[c].items():
+                        if lane_link_id(cl_el, "successor") == lid:
+                            j_opts.append((c, clid))
+            out[(rid, lid)] = j_opts
     return out
+
+
+def carla_successors(root: ET.Element) -> dict[int, list[int]]:
+    """Successor roads of every road's lane -1, resolved the way LibCarla does."""
+    lane_succ = carla_lane_successors(root)
+    roads = {int(r.get("id")): r for r in root.findall("road")}
+    return {
+        rid: [nr for (nr, _) in lane_succ.get((rid, -1), [])]
+        for rid in roads
+    }
 
 
 # --------------------------------------------------------------------------
@@ -829,6 +886,54 @@ def selftest() -> int:
     if abs(float(w.get("a")) - 3.5) > 1e-9:
         failures.append(f"lane width should be 3.5 m, got {w.get('a')}")
 
+    # Multi-lane unidirectional road: interior boundary is broken/both, outer curb
+    # and center line are solid/none, and lane -2 resolves through a junction into
+    # lane -2 of the outgoing 2-lane road.
+    ml_cross = to_xodr({
+        "roads": [
+            {"id": "MA", "lane_width_cm": 350.0, "lane_widths_cm": [350.0, 400.0],
+             "unidirectional": True, "lane_count": 2, "lane_offset_cm": 175.0,
+             "points": [{"pos": [0, 0, 0], "tangent": [1, 0, 0]},
+                        {"pos": [5000, 0, 0], "tangent": [1, 0, 0]}],
+             "successor": to_j},
+            {"id": "MC1", "lane_width_cm": 350.0, "unidirectional": True,
+             "lane_count": 1, "lane_offset_cm": 175.0, "junction": "J",
+             "points": [{"pos": [5000, 0, 0], "tangent": [1, 0, 0]},
+                        {"pos": [6000, 0, 0], "tangent": [1, 0, 0]}],
+             "predecessor": {"type": "road", "id": "MA", "contact": "end"},
+             "successor": {"type": "road", "id": "MB", "contact": "start"},
+             "lane_pred_ids": [-1], "lane_succ_ids": [-1]},
+            {"id": "MC2", "lane_width_cm": 400.0, "unidirectional": True,
+             "lane_count": 1, "lane_offset_cm": 200.0, "junction": "J",
+             "points": [{"pos": [5000, 375, 0], "tangent": [1, 0, 0]},
+                        {"pos": [6000, 375, 0], "tangent": [1, 0, 0]}],
+             "predecessor": {"type": "road", "id": "MA", "contact": "end"},
+             "successor": {"type": "road", "id": "MB", "contact": "start"},
+             "lane_pred_ids": [-2], "lane_succ_ids": [-2]},
+            {"id": "MB", "lane_width_cm": 350.0, "lane_widths_cm": [350.0, 400.0],
+             "unidirectional": True, "lane_count": 2, "lane_offset_cm": 175.0,
+             "points": [{"pos": [6000, 0, 0], "tangent": [1, 0, 0]},
+                        {"pos": [11000, 0, 0], "tangent": [1, 0, 0]}],
+             "predecessor": to_j},
+        ],
+        "junctions": [{"id": "J", "center": [5500, 0, 0], "connections": [
+            {"incoming": "MA", "connecting": "MC1", "contact": "start", "lane_links": [[-1, -1]]},
+            {"incoming": "MA", "connecting": "MC2", "contact": "start", "lane_links": [[-2, -1]]},
+        ]}],
+    }, name="ml-cross").getroot()
+    ml_rid = {r.get("name"): int(r.get("id")) for r in ml_cross.findall("road")}
+    ml_ls = carla_lane_successors(ml_cross)
+    if ml_ls.get((ml_rid["MA"], -1)) != [(ml_rid["MC1"], -1)] or ml_ls.get((ml_rid["MA"], -2)) != [(ml_rid["MC2"], -1)]:
+        failures.append(f"multi-lane junction entry failed: {ml_ls}")
+    if ml_ls.get((ml_rid["MC1"], -1)) != [(ml_rid["MB"], -1)] or ml_ls.get((ml_rid["MC2"], -1)) != [(ml_rid["MB"], -2)]:
+        failures.append(f"multi-lane junction exit failed: {ml_ls}")
+    ma_rd = next(r for r in ml_cross.findall("road") if r.get("name") == "MA")
+    c_mark = ma_rd.find("lanes/laneSection/center/lane/roadMark").get("laneChange")
+    l1_mark = ma_rd.find("lanes/laneSection/right/lane[@id='-1']/roadMark").get("laneChange")
+    l2_mark = ma_rd.find("lanes/laneSection/right/lane[@id='-2']/roadMark").get("laneChange")
+    if (c_mark, l1_mark, l2_mark) != ("none", "both", "none"):
+        failures.append(f"expected laneChange ('none', 'both', 'none'), got {(c_mark, l1_mark, l2_mark)}")
+
     # It must serialise and re-parse.
     with tempfile.TemporaryDirectory() as d:
         p = os.path.join(d, "t.xodr")
@@ -844,7 +949,7 @@ def selftest() -> int:
             print("  -", f)
         return 1
     print(f"selftest passed - {len(geos)} geometries, "
-          f"road length {acc:.2f} m, endpoint continuity < 1e-4 m")
+          f"road length {acc:.2f} m, endpoint continuity < 1e-4 m, multi-lane links verified")
     return 0
 
 
@@ -868,30 +973,33 @@ def main() -> int:
 
     root = tree.getroot()
     n_r, n_j = len(root.findall("road")), len(root.findall("junction"))
+    n_ml = sum(1 for r in root.findall("road")
+               if len(r.findall("lanes/laneSection/right/lane[@type='driving']")) > 1)
     total = sum(float(r.get("length")) for r in root.findall("road"))
-    print(f"wrote {args.output}: {n_r} roads, {n_j} junctions, {total/1000:.2f} km")
+    print(f"wrote {args.output}: {n_r} roads ({n_ml} multi-lane), {n_j} junctions, {total/1000:.2f} km")
     if n_j == 0:
         print("NOTE: no junctions. CARLA will treat every road as isolated - "
               "vehicles will not turn between them and the traffic manager will "
               "strand them at road ends.", file=sys.stderr)
 
-    # Where CARLA will find no next lane. Each one is a place the traffic
-    # manager destroys a vehicle (silently - osm_mode is on by default) and
-    # waypoint.next() returns []. Ends that run INTO a junction are a bug in
-    # this file; the others are lanes the source network itself ends.
+    # Where CARLA will find no next lane. Checked per driving lane (-1..-k), not
+    # only lane -1, so any unlinked outer lane on a multi-lane road is caught too.
     by_id = {int(r.get("id")): r for r in root.findall("road")}
-    driven = {rid for rid, r in by_id.items()
-              if r.find("lanes/laneSection/right/lane[@type='driving']") is not None}
-    dead = [rid for rid, nxt in carla_successors(root).items()
-            if not nxt and rid in driven]
+    driven_lanes = {
+        (rid, int(l.get("id")))
+        for rid, r in by_id.items()
+        for l in r.findall("lanes/laneSection/right/lane[@type='driving']")
+    }
+    dead = [(rid, lid) for (rid, lid), nxt in carla_lane_successors(root).items()
+            if not nxt and (rid, lid) in driven_lanes]
     into_junction = sum(
-        1 for rid in dead
+        1 for (rid, _) in dead
         if (by_id[rid].find("link/successor") is not None
             and by_id[rid].find("link/successor").get("elementType") == "junction"))
-    print(f"  dead ends as CARLA resolves them: {len(dead)} "
+    print(f"  dead-end driving lanes as CARLA resolves them: {len(dead)} "
           f"({into_junction} into a junction)")
     if into_junction:
-        print(f"WARNING: {into_junction} roads enter a junction that offers them "
+        print(f"WARNING: {into_junction} driving lanes enter a junction that offers them "
               "no connecting road - vehicles reaching them are destroyed.",
               file=sys.stderr)
     return 0
