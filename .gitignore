@@ -25,9 +25,12 @@ out/
 *-seg.png
 *.mp4
 *.gif
-# ...except the one showcase clip, which IS part of the repo.
+# ...except the showcase clips, which ARE part of the repo (docs/citysample-carla-nurec.*
+# is rendered from CC-BY-4.0 PhysicalAI NuRec data + CARLA 1.0, containing zero Epic content).
 !docs/citysample-carla.mp4
 !docs/citysample-carla.gif
+!docs/citysample-carla-nurec.mp4
+!docs/citysample-carla-nurec.gif
 
 # ---------------------------------------------------------------------------
 # Local machine state

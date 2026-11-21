@@ -35,6 +35,7 @@ TWO CONVENTIONS THAT MUST MATCH CARLA (Mesh::GenerateOBJForRecast):
 from __future__ import annotations
 
 import argparse
+import json
 import math
 import sys
 import xml.etree.ElementTree as ET
@@ -126,6 +127,59 @@ def read_root(path):
         except (UnicodeDecodeError, ET.ParseError):
             continue
     raise ValueError(f"cannot parse {path}")
+
+
+def load_json_any(path):
+    with open(path, "rb") as fh:
+        raw = fh.read()
+    for enc in ("utf-8-sig", "utf-16", "utf-16-le", "utf-16-be", "utf-8"):
+        try:
+            return json.loads(raw.decode(enc))
+        except (UnicodeDecodeError, UnicodeError, json.JSONDecodeError):
+            continue
+    raise ValueError(f"cannot decode {path} as JSON")
+
+
+def extract_zonegraph_sidewalk_lanes(zg_doc: dict) -> list[dict]:
+    """Extract Epic's authored Pedestrian (non-Crosswalk) lanes directly from
+    `zonegraph.json`, propagating sidewalk membership to untagged neighbours."""
+    out: list[dict] = []
+    for graph in zg_doc.get("zone_graphs", []):
+        lanes = graph.get("lanes", [])
+        if not lanes:
+            continue
+        by_idx = {ln["index"]: ln for ln in lanes}
+        adj: dict[int, list[int]] = defaultdict(list)
+        resolved: dict[int, str] = {}
+        queue: list[int] = []
+        for ln in lanes:
+            tags = ln.get("tags", [])
+            if "Crosswalk" in tags or "Pedestrian" in tags:
+                resolved[ln["index"]] = "sidewalk"
+                queue.append(ln["index"])
+            elif any(t in tags for t in ("Vehicle", "Freeway", "Freeway Onramp", "Freeway Offramp")):
+                resolved[ln["index"]] = "driving"
+                queue.append(ln["index"])
+            for lk in ln.get("links", []):
+                v = lk.get("dest")
+                if v in by_idx:
+                    adj[ln["index"]].append(v)
+                    adj[v].append(ln["index"])
+        head = 0
+        while head < len(queue):
+            u = queue[head]
+            head += 1
+            for v in adj.get(u, ()):
+                if v not in resolved:
+                    resolved[v] = resolved[u]
+                    queue.append(v)
+        for ln in lanes:
+            tags = ln.get("tags", [])
+            if "Crosswalk" in tags:
+                continue
+            if resolved.get(ln["index"]) == "sidewalk" and len(ln.get("points", [])) >= 2:
+                out.append(ln)
+    return out
 
 
 def poly3(a, b, c, d, t):
@@ -580,7 +634,7 @@ def road_ribbon(road, step, t_inner, t_outer):
 
 
 def build(root, step=2.0, verbose=False, sidewalk_width=SIDEWALK_WIDTH,
-          corners=True):
+          corners=True, zonegraph_doc: dict | None = None):
     obj = ObjWriter()
     obj.material("road")
 
@@ -604,21 +658,41 @@ def build(root, step=2.0, verbose=False, sidewalk_width=SIDEWALK_WIDTH,
         n_roads += 1
     mark_quads(road_cells, road_quads)
 
-    # Measured sidewalks: lanes the .xodr itself types as sidewalk - Epic's own
-    # pedestrian lanes, kept with zonegraph_to_roadnetwork --keep-sidewalks.
-    # CARLA's exporter meshes sidewalk lanes as sidewalk area as well. When a
-    # network has them, synthesising strips on top would only add guesses.
+    # Measured sidewalks: either directly from Epic's authored ZoneGraph
+    # Pedestrian lanes (--zonegraph, keeping the .xodr compact) or from
+    # sidewalk-typed lanes inside the .xodr (--keep-sidewalks). When measured
+    # sidewalks exist, synthesising 2.5 m strips on top would only add guesses.
+    zg_sidewalks = extract_zonegraph_sidewalk_lanes(zonegraph_doc) if zonegraph_doc else []
     measured = []
     for road in root.findall("road"):
         edges = carriageway_edges(road, "sidewalk")
         if edges is not None:
             measured.append((road, edges))
-    synthesise = sidewalk_width > 0.0 and not measured
+    synthesise = sidewalk_width > 0.0 and not measured and not zg_sidewalks
 
     n_sw = n_sw_measured = n_corner = 0
     n_sw_dropped = 0
-    if measured or synthesise:
+    if zg_sidewalks or measured or synthesise:
         obj.material("sidewalk")
+    for ln in zg_sidewalks:
+        # Epic authors Pedestrian lanes at 1.0 m width; pad single-lane ribbons
+        # slightly (1.6 m total, 0.8 m half-width) so Recast's 2 x 0.3 m agent
+        # radius erosion leaves a solid navigable corridor around every corner.
+        half_w = max(0.5 * float(ln.get("width_cm", 100.0)) * 0.01, 0.8)
+        pts = [(p["pos"][0] * 0.01, -p["pos"][1] * 0.01, p["pos"][2] * 0.01)
+               for p in ln["points"]]
+        prev = None
+        for i, (x, y, z) in enumerate(pts):
+            ax, ay, _ = pts[max(0, i - 1)]
+            bx, by, _ = pts[min(len(pts) - 1, i + 1)]
+            hdg = math.atan2(by - ay, bx - ax)
+            nx, ny = -math.sin(hdg), math.cos(hdg)
+            cur = ((x + nx * half_w, y + ny * half_w, z),
+                   (x - nx * half_w, y - ny * half_w, z))
+            if prev is not None:
+                obj.add_quad(prev[0], cur[0], cur[1], prev[1])
+                n_sw_measured += 1
+            prev = cur
     for road, (offset, left_w, right_w) in measured:
         for quad in road_ribbon(road, step, offset + left_w, offset - right_w):
             obj.add_quad(*quad)
@@ -716,7 +790,10 @@ def build(root, step=2.0, verbose=False, sidewalk_width=SIDEWALK_WIDTH,
 
     if verbose:
         print(f"  roads meshed     : {n_roads:,}")
-        if measured:
+        if zg_sidewalks:
+            print(f"  sidewalk quads   : {n_sw_measured:,} from {len(zg_sidewalks):,} "
+                  "measured ZoneGraph pedestrian lanes (none synthesised)")
+        elif measured:
             print(f"  sidewalk quads   : {n_sw_measured:,} from {len(measured):,} "
                   "sidewalk lanes in the .xodr (none synthesised)")
         else:
@@ -731,6 +808,10 @@ def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[1])
     ap.add_argument("xodr", nargs="?")
     ap.add_argument("-o", "--output", default=None)
+    ap.add_argument("--zonegraph", default=None,
+                    help="optional zonegraph.json to mesh Epic's measured "
+                         "Pedestrian lanes directly instead of synthesising "
+                         "2.5 m strips (keeps .xodr free of 60k sidewalk roads)")
     ap.add_argument("--step", type=float, default=2.0,
                     help="sampling step along the reference line, metres")
     ap.add_argument("--sidewalk-width", type=float, default=SIDEWALK_WIDTH,
@@ -749,9 +830,11 @@ def main() -> int:
         ap.error("an .xodr is required (or --selftest)")
 
     root = read_root(args.xodr)
+    zg_doc = load_json_any(args.zonegraph) if args.zonegraph else None
     obj, n_roads, n_cw, n_sw = build(
         root, args.step, verbose=True,
-        sidewalk_width=0.0 if args.no_sidewalks else args.sidewalk_width)
+        sidewalk_width=0.0 if args.no_sidewalks else args.sidewalk_width,
+        zonegraph_doc=zg_doc)
     out = args.output or args.xodr.rsplit(".", 1)[0] + ".obj"
     obj.write(out)
     if not obj.faces:

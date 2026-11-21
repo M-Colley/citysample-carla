@@ -52,10 +52,11 @@ param(
     #   -ExecCmds "carla.MassBridge.Enable 1"
     [string[]] $ExecCmds = @(),
     [switch] $RenderOffScreen,
-    [string] $LogDir = (Join-Path $PSScriptRoot "..\logs")
+    [string] $LogDir = ""
 )
 
 $ErrorActionPreference = "Stop"
+if (-not $LogDir) { $LogDir = Join-Path $PSScriptRoot "..\logs" }
 
 $uproject = Join-Path $CitySample "CitySample.uproject"
 $exe = if ($Configuration -eq "Development") {

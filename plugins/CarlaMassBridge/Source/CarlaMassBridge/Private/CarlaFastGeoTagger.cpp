@@ -30,13 +30,13 @@ namespace
 {
   static TAutoConsoleVariable<int32> CVarFastGeoTagger(
       TEXT("carla.FastGeoTagger.Enable"),
-      0,
+      1,
       TEXT("Apply CARLA semantic labels to City Sample's FastGeo geometry.\n"
            "FastGeo primitives are not UObjects, so CARLA's ATagger cannot reach\n"
            "them and ~98%% of every semantic frame comes back Unlabeled without\n"
            "this.\n"
-           "  0: off (default)\n"
-           "  1: on"),
+           "  0: off\n"
+           "  1: on (default)"),
       ECVF_Default);
 
   /// Shortest gap between sweeps. Small enough that newly streamed geometry is
@@ -180,6 +180,7 @@ void UCarlaFastGeoTaggerSubsystem::Deinitialize()
     // dangling TFunction behind a static would still be a trap on hot reload.
     ATagger::SetHitLabelResolver(nullptr);
     MeshLabels.Reset();
+    CompletedContainers.Reset();
     Super::Deinitialize();
 }
 
@@ -187,6 +188,7 @@ void UCarlaFastGeoTaggerSubsystem::OnStreamingStateUpdated()
 {
     if (CVarFastGeoTagger.GetValueOnGameThread() == 0)
     {
+        CompletedContainers.Reset();
         return;
     }
     UWorld *World = GetWorld();
@@ -231,9 +233,21 @@ int32 UCarlaFastGeoTaggerSubsystem::TagFastGeoGeometry()
     int32 Unmatched = 0;
     int32 Seen = 0;
     int32 Containers = 0;
+    int32 SkippedContainers = 0;
     int32 Deferred = 0;
     int32 AlreadyTagged = 0;
     int32 SkippedSkinned = 0, SkippedOther = 0;
+
+    auto ReportUnmatchedFastGeo = [](const FString &AssetPath)
+    {
+        static TSet<FString> Reported;
+        bool bAlready = false;
+        Reported.Add(AssetPath, &bAlready);
+        if (!bAlready)
+        {
+            UE_LOG(LogCarlaCitySample, Log, TEXT("CarlaFastGeoTagger: UNMATCHED \"%s\""), *AssetPath);
+        }
+    };
 
     for (TObjectIterator<UFastGeoContainer> It; It; ++It)
     {
@@ -245,33 +259,42 @@ int32 UCarlaFastGeoTaggerSubsystem::TagFastGeoGeometry()
 
         ++Containers;
 
-        // NO SKIPPING BY POINTER, at either level.
-        //
-        // Two earlier versions of this sweep tried to avoid re-walking the
-        // world: a TSet of component pointers already tagged, and a TMap of
-        // containers whose primitive count had not changed. Both are wrong for
-        // the same reason. World Partition unloads a container when the
-        // streaming source moves away and loads it again when it comes back,
-        // and the allocator hands out the SAME ADDRESSES for the replacements.
-        // A pointer-keyed table then reports brand-new, untagged components as
-        // already done, and the geometry renders with whatever happened to be
-        // in its custom primitive data - which the segmentation shader reads as
-        // a label. Measured at one fixed viewpoint, the same scene came back
-        // anywhere between 0% and 92% Unlabeled depending on how the streaming
-        // had cycled.
-        //
-        // So the sweep is stateless and verifies against the component's own
-        // data instead. Reading one float and comparing it cannot go stale.
-        // Walking ~50,000 components is not free, though, which is why
-        // OnStreamingStateUpdated rate-limits to kSweepIntervalSeconds rather
-        // than sweeping on every update.
+        // NEVER key completion on a raw pointer (World Partition unloads and
+        // reloads cells, and FMalloc reuses addresses). FObjectKey combines
+        // GUObjectArray index + monotonically increasing SerialNumber, so a
+        // newly streamed UFastGeoContainer can NEVER match an unloaded one.
+        // Furthermore, a container is only recorded in CompletedContainers once
+        // an entire verifying pass saw NewlyTagged == 0 and Deferred == 0 (all
+        // render proxies created and carrying their target label).
+        const FObjectKey ContainerKey(Container);
+        const auto &Primitives = Container->GetPrimitiveComponents();
+        const int32 TotalPrims = Primitives.Num();
+        if (const FCompletedContainerInfo *Done = CompletedContainers.Find(ContainerKey))
+        {
+            if (Done->TotalPrimitives == TotalPrims)
+            {
+                Seen += Done->SeenStatic;
+                AlreadyTagged += Done->Tagged;
+                Unmatched += Done->Unmatched;
+                ++SkippedContainers;
+                continue;
+            }
+            CompletedContainers.Remove(ContainerKey);
+        }
+
+        int32 ContainerSeen = 0;
+        int32 ContainerNewlyTagged = 0;
+        int32 ContainerAlready = 0;
+        int32 ContainerUnmatched = 0;
+        int32 ContainerDeferred = 0;
+
         // Iterate PRIMITIVES, not GetStaticMeshComponents(). That array is
         // filled with `CastTo<FFastGeoStaticMeshComponent>()` - the concrete
         // non-instanced class - so it silently excludes
         // FFastGeoInstancedStaticMeshComponent, the sibling that a modular city
         // is almost entirely built from. Using it found 184 components across
         // 58 containers; the instanced ones are the rest.
-        for (IPrimitiveComponent *PrimitiveComponent : Container->GetPrimitiveComponents())
+        for (IPrimitiveComponent *PrimitiveComponent : Primitives)
         {
             if (PrimitiveComponent == nullptr)
             {
@@ -284,14 +307,6 @@ int32 UCarlaFastGeoTaggerSubsystem::TagFastGeoGeometry()
                     ->CastTo<FFastGeoStaticMeshComponentBase>();
             if (FastGeoComponent == nullptr)
             {
-                // Census the misses so "still unlabeled" points at a type
-                // rather than a mystery. Only two buckets are possible: skinned
-                // meshes (Epic's crowd, which the Mass bridge covers
-                // separately) and everything else. Procedural ISM does NOT
-                // appear here - FFastGeoProceduralISMComponent derives from
-                // FFastGeoStaticMeshComponentBase and its type token is
-                // parented to it, so CastTo above already matched it and the
-                // road surface is tagged like any other mesh.
                 FFastGeoPrimitiveComponent *Prim =
                     static_cast<FFastGeoPrimitiveComponent *>(PrimitiveComponent);
                 if (Prim->CastTo<FFastGeoSkinnedMeshComponentBase>() != nullptr)
@@ -305,6 +320,7 @@ int32 UCarlaFastGeoTaggerSubsystem::TagFastGeoGeometry()
                 continue;
             }
             ++Seen;
+            ++ContainerSeen;
 
             const UStaticMesh *Mesh = FastGeoComponent->GetStaticMesh();
             if (Mesh == nullptr)
@@ -312,19 +328,6 @@ int32 UCarlaFastGeoTaggerSubsystem::TagFastGeoGeometry()
                 continue;
             }
 
-            // The rule table once per MESH, not once per component per sweep.
-            // GetLabelByAssetPath builds a path string and allocates a fresh
-            // FString per rule it tries, and the sweep visits ~50,000
-            // components four times a second - for an answer that depends on
-            // nothing but which asset this is.
-            //
-            // This is not the pointer cache the note above forbids. That one
-            // remembered WHETHER A COMPONENT WAS DONE, keyed on an address the
-            // allocator reuses. This remembers WHAT LABEL A MESH ASSET GETS,
-            // keyed on FObjectKey - object index plus serial number - so a
-            // recycled address or slot is a different key, and a miss just
-            // runs the rule table again. Whether each component is actually
-            // tagged is still read from the component itself, every sweep.
             const FObjectKey MeshKey(Mesh);
             crp::CityObjectLabel Label;
             if (const uint8 *Known = MeshLabels.Find(MeshKey))
@@ -333,30 +336,34 @@ int32 UCarlaFastGeoTaggerSubsystem::TagFastGeoGeometry()
             }
             else
             {
-                Label = ATagger::GetLabelByAssetPath(Mesh->GetPathName());
+                const FString AssetPath = Mesh->GetPathName();
+                Label = ATagger::GetLabelByAssetPath(AssetPath);
                 MeshLabels.Add(MeshKey, static_cast<uint8>(Label));
+                if (Label == crp::CityObjectLabel::None)
+                {
+                    ReportUnmatchedFastGeo(AssetPath);
+                }
             }
             if (Label == crp::CityObjectLabel::None)
             {
-                // No rule matches this path, so leave the data untouched
-                // rather than writing 0 over it.
                 ++Unmatched;
+                ++ContainerUnmatched;
                 continue;
             }
 
-            // Preserve whatever the material already relies on: copy the
-            // existing floats, grow to reach CARLA's slot, then overwrite only
-            // the two the segmentation shader reads.
             const FCustomPrimitiveData &Existing =
                 FFastGeoCustomDataAccess::Read(*FastGeoComponent);
 
-            // The component's own data is the authority on whether it is done.
-            // This is the check that makes the sweep safe to repeat and immune
-            // to a recycled address.
             if (Existing.Data.Num() >= kRequiredFloats &&
                 Existing.Data[kCarlaLabelFloatIndex + 1] == static_cast<float>(Label))
             {
+                if (!FastGeoComponent->IsRenderStateCreated())
+                {
+                    ++Deferred;
+                    ++ContainerDeferred;
+                }
                 ++AlreadyTagged;
+                ++ContainerAlready;
                 continue;
             }
 
@@ -369,50 +376,47 @@ int32 UCarlaFastGeoTaggerSubsystem::TagFastGeoGeometry()
             Data[kCarlaLabelFloatIndex + 1] = static_cast<float>(Label);  // label
             FastGeoComponent->SetCustomPrimitiveData(Data);
 
-            // DO NOT force MarkRenderStateDirty(true) here.
-            //
-            // SetCustomPrimitiveData already marks the state dirty with
-            // bEvenIfNotCreated = false, which looks like a gap: a component
-            // tagged before its proxy exists is never queued for recreation.
-            // It is not a gap. CreateRenderState builds the proxy from the
-            // component's CURRENT data, so a label written beforehand is
-            // simply picked up when the proxy is eventually created - there is
-            // nothing to invalidate.
-            //
-            // Forcing the flag does actively break things. It queues a
-            // component whose ProxyState is `Creating` for recreation, and the
-            // recreate path re-enters CreateRenderState, which asserts:
-            //
-            //   Assertion failed: ProxyState == EProxyCreationState::None ||
-            //                     ProxyState == EProxyCreationState::Delayed
-            //   FastGeoPrimitiveComponent.cpp:331
-            //
-            // That is a race against World Partition streaming, so it survives
-            // whole sessions and then takes the server down mid-run.
+            // DO NOT force MarkRenderStateDirty(true) here: see FastGeoPrimitiveComponent.cpp:331.
             if (!FastGeoComponent->IsRenderStateCreated())
             {
                 ++Deferred;
+                ++ContainerDeferred;
             }
             ++NewlyTagged;
+            ++ContainerNewlyTagged;
+        }
+
+        if (ContainerNewlyTagged == 0 && ContainerDeferred == 0)
+        {
+            CompletedContainers.Add(
+                ContainerKey,
+                FCompletedContainerInfo{
+                    TotalPrims, ContainerSeen, ContainerAlready, ContainerUnmatched});
         }
     }
 
-    // At Log, not Verbose: "written N" is meaningless without the denominator
-    // and the unmatched count. This is one line per sweep, not per component.
-    // In the steady state `written` is 0 and `already` is everything, which is
-    // the signal that the world is fully labelled - and it drops back as soon
-    // as streaming brings new geometry in.
-    // Only when something actually changed. One line per sweep produced 76,606
-    // log lines in a single session, which is both noise and real I/O cost.
-    if (Seen > 0 && (NewlyTagged > 0 || Unmatched > 0 || Seen != LastSweepSeen))
+    if (CompletedContainers.Num() > Containers * 2 + 64)
+    {
+        for (auto MapIt = CompletedContainers.CreateIterator(); MapIt; ++MapIt)
+        {
+            if (MapIt.Key().ResolveObjectPtr() == nullptr)
+            {
+                MapIt.RemoveCurrent();
+            }
+        }
+    }
+
+    if (Seen > 0 && (NewlyTagged > 0 || Deferred > 0 || Seen != LastSweepSeen ||
+                     Containers != LastLoggedContainers))
     {
         UE_LOG(LogCarlaCitySample, Log,
-               TEXT("CarlaFastGeoTagger sweep: %d containers, %d seen, %d written, "
+               TEXT("CarlaFastGeoTagger sweep: %d containers (%d cached), %d seen, %d written, "
                     "%d already, %d unmatched, %d awaiting render state"),
-               Containers, Seen, NewlyTagged, AlreadyTagged, Unmatched, Deferred);
+               Containers, SkippedContainers, Seen, NewlyTagged, AlreadyTagged, Unmatched, Deferred);
         UE_LOG(LogCarlaCitySample, Verbose,
                TEXT("CarlaFastGeoTagger skipped: %d skinned, %d other"),
                SkippedSkinned, SkippedOther);
+        LastLoggedContainers = Containers;
     }
     LastSweepSeen = Seen;
     LastSweepTaggedTotal = AlreadyTagged + NewlyTagged;

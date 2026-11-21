@@ -77,6 +77,31 @@ def lane_type(tags: list[str]) -> str:
     return explicit_lane_type(tags) or "driving"
 
 
+def road_type_name(tags: list[str]) -> str:
+    return "motorway" if "Freeway" in tags else "town"
+
+
+def road_speed_kmh(tags: list[str]) -> float:
+    """Road-class speed limit (km/h) derived from Epic's ZoneGraph tags.
+
+    City Sample carries no 3D speed-limit sign props, but every ZoneGraph lane
+    declares its functional class (`Freeway`, `Trunk Road`, `Freeway Onramp` /
+    `Offramp`, or `City` with `Vehicle Density 0..3`). Values are multiples of
+    10 km/h matching CARLA's `SpeedLimitModels` (`30..120`) and US MUTCD plates.
+    """
+    if "Freeway" in tags:
+        if "Freeway Onramp" in tags or "Freeway Offramp" in tags:
+            return 60.0
+        if "Trunk Road" in tags:
+            return 90.0
+        return 80.0
+    if "Vehicle Density 3" in tags:
+        return 50.0
+    if "Vehicle Density 2" in tags:
+        return 40.0
+    return 30.0
+
+
 def resolve_lane_types(lanes: list[dict]) -> dict[int, str]:
     """Resolve OpenDRIVE lane type for every lane, propagating across links when
     Epic left a ZoneGraph shape's tags blank (17 1 m sidewalk lanes in
@@ -314,6 +339,8 @@ def convert(doc: dict, *, keep_sidewalks: bool = False) -> dict:
                 "lane_count": 1,
                 "lane_offset_cm": width / 2.0,
                 "is_freeway": "Freeway" in tags,
+                "road_type": road_type_name(tags),
+                "speed_kmh": road_speed_kmh(tags),
                 "lane_type": ltypes[idx],
                 "tags": tags,
                 **({"junction": jid} if jid else {}),
@@ -475,6 +502,13 @@ def selftest() -> int:
     sw_kept = convert(untagged_sw, keep_sidewalks=True)
     if {r["id"]: r["lane_type"] for r in sw_kept["roads"]} != {"zg_l0": "sidewalk", "zg_l1": "sidewalk"}:
         fails.append(f"untagged sidewalk did not inherit sidewalk type: {sw_kept['roads']}")
+
+    # Road-class speeds from ZoneGraph tags: Trunk freeway 90, ramp 60, arterial 50, city 30.
+    if (road_speed_kmh(["Freeway", "Trunk Road", "Vehicle"]),
+        road_speed_kmh(["Freeway", "Freeway Onramp", "Vehicle"]),
+        road_speed_kmh(["City", "Vehicle", "Vehicle Density 3"]),
+        road_speed_kmh(["City", "Vehicle", "Vehicle Density 0"])) != (90.0, 60.0, 50.0, 30.0):
+        fails.append("road_speed_kmh mapping mismatch")
 
     if fails:
         print("SELFTEST FAILED")

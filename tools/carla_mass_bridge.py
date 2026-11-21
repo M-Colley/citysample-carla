@@ -136,9 +136,10 @@ def main() -> int:
     ok = moved > 0
     print(f"\n{'PASS' if ok else 'FAIL'} - "
           f"{'proxies track live Mass entities' if ok else 'no proxy moved; they may be frozen'}")
-    print("\nReminder: these proxies are READ-ONLY, and CARLA's Traffic Manager")
-    print("must NOT be run while the bridge is on - ALSM adopts every actor whose")
-    print("type id starts with 'v', with no dormant check.")
+    print("\nNote: proxies are READ-ONLY (dormant IDs >= 0x80000000) and center on")
+    print("role_name='hero' when present (or the spectator; carla.MassBridge.FollowHero).")
+    print("With the CARLA 1.0 ALSM dormant-actor patch applied, CARLA's Traffic Manager")
+    print("can run alongside the bridge and yields to nearby Mass vehicles.")
     return 0 if ok else 1
 
 

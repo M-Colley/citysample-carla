@@ -9,8 +9,8 @@ authors:
     # orcid: "https://orcid.org/0000-0000-0000-0000"
 repository-code: "https://github.com/M-Colley/citysample-carla"
 doi: "10.5281/zenodo.22306770"
-version: v1.0.0
-date-released: "2026-09-04"
+version: v1.1.0
+date-released: "2026-11-21"
 identifiers:
   - type: doi
     value: "10.5281/zenodo.22306770"
@@ -19,14 +19,18 @@ identifiers:
     value: "10.5281/zenodo.22306771"
     description: DOI for release v1.0.0.
 abstract: >-
-  Tooling that runs Epic Games' City Sample (Unreal Engine 5.8) as a CARLA
-  0.10.0 driving simulator, and extracts the city's road network as ASAM
-  OpenDRIVE so it can be driven in any CARLA. Includes an Unreal plugin that
-  exports Epic's ZoneGraph, converters that produce OpenDRIVE with traffic
-  lights, stop signs and crosswalks, a bridge that makes Epic's Mass ECS
-  traffic and crowd visible to the CARLA API, a semantic tagger for geometry
-  streamed through FastGeoStreaming, and a pedestrian navmesh builder. No Epic
-  Games content is redistributed.
+  Tooling that runs Epic Games' City Sample (Unreal Engine 5.8, both
+  Small_City_LVL and Big_City_LVL) as a CARLA 1.0 driving simulator, and
+  extracts the city's road network as ASAM OpenDRIVE so it can be driven in any
+  CARLA. Includes an Unreal plugin that exports Epic's ZoneGraph, converters
+  that produce OpenDRIVE with road-class speed limits, traffic lights, stop
+  signs, yield signs, speed-limit signs and crosswalks, a bridge that mirrors
+  Epic's Mass ECS traffic and crowd around the ego vehicle into the CARLA API
+  while coexisting with CARLA's Traffic Manager, an out-of-the-box semantic
+  tagger for geometry streamed through FastGeoStreaming, a pedestrian navmesh
+  builder backed by Epic's measured ZoneGraph pedestrian lanes, and verified
+  compatibility with CARLA 1.0's NVIDIA NuRec neural reconstruction pipeline.
+  No Epic Games content is redistributed.
 keywords:
   - CARLA
   - Unreal Engine
@@ -36,4 +40,6 @@ keywords:
   - OpenDRIVE
   - semantic segmentation
   - LiDAR
+  - NuRec
+  - 3D Gaussian Splatting
 license: MIT

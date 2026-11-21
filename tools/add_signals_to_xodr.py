@@ -91,8 +91,11 @@ SIGNAL_TYPE = "1000001"          # CARLA: SignalType::IsTrafficLight
 # CARLA already knows this type: ATrafficLightManager maps SignalType::StopSign
 # to a stop-sign actor with a UStopSignComponent trigger volume, so these become
 # real traffic.stop actors the client can query.
+YIELD_SIGN_TYPE = "205"          # CARLA: SignalType::YieldSign
 STOP_SIGN_TYPE = "206"           # CARLA: SignalType::StopSign
+SPEED_LIMIT_TYPE = "274"         # CARLA: SignalType::MaximumSpeed
 MOUNT_HEIGHT_M = 5.5
+SIGN_MOUNT_HEIGHT_M = 2.2
 
 
 def odr_to_ue(x: float, y: float) -> tuple[float, float]:
@@ -506,8 +509,23 @@ def phase_of(sides) -> dict:
 
 def group_approach_sides(approaches_for_junction: list[Approach]) -> list[dict]:
     """Cluster co-located parallel approach lanes of one junction into sides,
-    with each side's `host` set to the rightmost (kerbside) lane."""
-    same_way = math.radians(25)
+    with each side's `host` set to the rightmost (kerbside) lane.
+
+    Two lanes belong to the same carriageway iff they share the same road speed
+    class and stay parallel upstream (preventing an acute on-ramp or slip lane
+    from collapsing into the mainline carriageway at the merge nose)."""
+    same_way = math.radians(18)
+
+    def same_carriageway(a: Approach, b: Approach) -> bool:
+        if road_speed_info(a.road) != road_speed_info(b.road):
+            return False
+        if abs(_ang_diff(a.hdg, b.hdg)) >= same_way:
+            return False
+        d_back = min(12.0, a.length, b.length)
+        ax, ay, _ = road_point_at_s(a.road, max(0.0, a.length - d_back))
+        bx, by, _ = road_point_at_s(b.road, max(0.0, b.length - d_back))
+        return math.hypot(ax - bx, ay - by) <= SIDE_JOIN_M + 2.0
+
     sides: list[dict] = []
     claimed: set[str] = set()
     for a in sorted(approaches_for_junction, key=lambda x: int(x.road_id)):
@@ -515,7 +533,7 @@ def group_approach_sides(approaches_for_junction: list[Approach]) -> list[dict]:
             continue
         near = [(math.hypot(a.x - s["host"].x, a.y - s["host"].y), i)
                 for i, s in enumerate(sides)
-                if abs(_ang_diff(a.hdg, s["hdg"])) < same_way]
+                if same_carriageway(a, s["host"])]
         near = [(d, i) for d, i in near if d <= SIDE_JOIN_M]
         if near:
             side = sides[min(near)[1]]
@@ -524,7 +542,7 @@ def group_approach_sides(approaches_for_junction: list[Approach]) -> list[dict]:
             claimed.add(a.road_id)
             continue
         members = [b for b in approaches_for_junction if b.road_id not in claimed
-                   and abs(_ang_diff(b.hdg, a.hdg)) < same_way
+                   and same_carriageway(a, b)
                    and math.hypot(b.x - a.x, b.y - a.y) <= SIDE_RADIUS_M]
         claimed.update(m.road_id for m in members)
         sides.append({
@@ -535,22 +553,164 @@ def group_approach_sides(approaches_for_junction: list[Approach]) -> list[dict]:
     return sides
 
 
+def road_speed_info(road: ET.Element) -> tuple[str, int]:
+    """Return `(road_type, speed_kmh)` from `<road><type><speed/></type>`."""
+    t_elem = road.find("type")
+    if t_elem is None:
+        return ("town", 30)
+    rtype = t_elem.get("type", "town")
+    sp_elem = t_elem.find("speed")
+    if sp_elem is None:
+        return (rtype, 80 if rtype == "motorway" else 30)
+    try:
+        kmh = int(round(float(sp_elem.get("max", "30"))))
+    except ValueError:
+        kmh = 30
+    return (rtype, kmh)
+
+
+def clear_curb_pose_at_start(road: ET.Element, length: float, n_lanes: int,
+                             lane_offset: float, lane_width: float,
+                             surface_grid: RoadSurfaceGrid | None,
+                             min_margin: float = 0.8, max_extra_m: float = 42.0) -> tuple[float, float]:
+    """Return `(s_pos, t)` near the start of `road` placing a speed-limit pole off every lane."""
+    s_default = min(max(2.0, 0.25 * length), 6.0) if length < 16.0 else 6.0
+    t_base = lane_offset - n_lanes * lane_width - POLE_CLEAR_M
+    if surface_grid is None:
+        return (s_default, t_base)
+
+    steps = int(round(max_extra_m / 0.5))
+    best_pose = (s_default, t_base)
+    rx0, ry0, rhdg0 = road_point_at_s(road, s_default)
+    best_clear = surface_grid.min_clearance(*odr_lateral_point(rx0, ry0, rhdg0, t_base))
+    if best_clear >= min_margin:
+        return best_pose
+
+    offsets = [s_default, 9.0, 12.0, 16.0, 3.0]
+    for fwd in offsets:
+        s_cand = min(max(1.0, fwd), max(1.0, length - 1.5))
+        rx, ry, rhdg = road_point_at_s(road, s_cand)
+        for k in range(0, steps + 1):
+            cand_t = t_base - 0.5 * k
+            clr = surface_grid.min_clearance(*odr_lateral_point(rx, ry, rhdg, cand_t))
+            if clr >= min_margin:
+                return (s_cand, cand_t)
+            if clr > best_clear:
+                best_clear = clr
+                best_pose = (s_cand, cand_t)
+
+    t_left_base = lane_offset + POLE_CLEAR_M
+    for fwd in offsets:
+        s_cand = min(max(1.0, fwd), max(1.0, length - 1.5))
+        rx, ry, rhdg = road_point_at_s(road, s_cand)
+        for k in range(0, steps + 1):
+            cand_t = t_left_base + 0.5 * k
+            clr = surface_grid.min_clearance(*odr_lateral_point(rx, ry, rhdg, cand_t))
+            if clr >= min_margin:
+                return (s_cand, cand_t)
+            if clr > best_clear:
+                best_clear = clr
+                best_pose = (s_cand, cand_t)
+    return best_pose
+
+
 def emit_stop_signs(root: ET.Element, approaches, signalised_junctions,
-                    surface_grid: RoadSurfaceGrid | None = None):
-    """One kerbside stop sign per approach SIDE at unsignalised junctions, with
-    <signalReference> on sibling parallel lanes so inner lanes get trigger boxes
-    without spawning stop-sign poles in the middle of the street."""
+                    surface_grid: RoadSurfaceGrid | None = None,
+                    emit_yields: bool = True):
+    """Emit kerbside priority signs (Stop `206` and Yield `205`) at unsignalised
+    junctions, with `<signalReference>` on sibling parallel lanes:
+
+    - Freeway / ramp unsignalised merges (`type="motorway"`): mainline highway
+      through-lanes keep free-flow right-of-way (no sign), while merging ramps /
+      secondary arms receive a Yield sign (`205`).
+    - Acute 2-arm urban merges (`< 65 deg`, e.g. slip lanes): the merging right-
+      hand / lower-speed arm receives a Yield sign (`205`), while the through
+      corridor flows freely.
+    - Multi-arm urban unsignalised intersections receive Stop signs (`206`)."""
     roads_by_id = {r.get("id"): r for r in root.findall("road")}
     by_junc: dict[str, list[Approach]] = defaultdict(list)
     for a in approaches:
         if a.junction not in signalised_junctions:
             by_junc[a.junction].append(a)
 
-    n = n_ref = 0
+    n_stop = n_stop_ref = n_stop_junc = 0
+    n_yield = n_yield_ref = n_yield_junc = 0
     for jid, j_approaches in sorted(by_junc.items(), key=lambda kv: int(kv[0])):
-        for side in group_approach_sides(j_approaches):
+        sides = group_approach_sides(j_approaches)
+        if not sides:
+            continue
+
+        side_meta = []
+        for s in sides:
+            infos = [road_speed_info(m.road) for m in s["members"]]
+            is_mw = any(rt == "motorway" for rt, _ in infos)
+            spd = max(kmh for _, kmh in infos)
+            side_meta.append((is_mw, spd))
+
+        any_motorway = any(is_mw for is_mw, _ in side_meta)
+        max_spd = max(spd for _, spd in side_meta)
+
+        # Decide per-side action: "stop", "yield", or "free"
+        actions = ["stop"] * len(sides)
+        if len(sides) == 1:
+            # Pure diverge / fork (1 incoming approach splitting into multiple
+            # outgoing branches): zero conflicting traffic, never place a sign.
+            actions[0] = "free"
+        elif emit_yields and any_motorway:
+            # Mainline motorway approaches (>= 80 km/h at max_spd) flow freely;
+            # ramps and lower-speed / secondary merges get Yield signs.
+            free_indices = [i for i, (is_mw, spd) in enumerate(side_meta)
+                            if is_mw and spd >= 80 and spd == max_spd]
+            if not free_indices:
+                best_i = max(range(len(sides)),
+                             key=lambda i: (side_meta[i][1], len(sides[i]["members"])))
+                free_indices = [best_i]
+            elif len(free_indices) == len(sides) and len(sides) >= 2:
+                mean_hdg = sides[0]["hdg"]
+                sin_h, cos_h = math.sin(mean_hdg), math.cos(mean_hdg)
+                rightmost_i = min(
+                    range(len(sides)),
+                    key=lambda i: -sides[i]["host"].x * sin_h + sides[i]["host"].y * cos_h)
+                free_indices = [i for i in free_indices if i != rightmost_i]
+            for i in range(len(sides)):
+                actions[i] = "free" if i in free_indices else "yield"
+        elif emit_yields and len(sides) == 2:
+            hdg_diff = abs(_ang_diff(sides[0]["hdg"], sides[1]["hdg"]))
+            if hdg_diff < math.radians(65):
+                # Acute slip-lane / Y-merge: major corridor flows freely, minor/rightmost yields.
+                if side_meta[0][1] != side_meta[1][1]:
+                    yield_i = 0 if side_meta[0][1] < side_meta[1][1] else 1
+                elif len(sides[0]["members"]) != len(sides[1]["members"]):
+                    yield_i = 0 if len(sides[0]["members"]) < len(sides[1]["members"]) else 1
+                else:
+                    sin_h, cos_h = math.sin(sides[0]["hdg"]), math.cos(sides[0]["hdg"])
+                    l0 = -sides[0]["host"].x * sin_h + sides[0]["host"].y * cos_h
+                    l1 = -sides[1]["host"].x * sin_h + sides[1]["host"].y * cos_h
+                    yield_i = 0 if l0 < l1 else 1
+                actions[yield_i] = "yield"
+                actions[1 - yield_i] = "free"
+        elif emit_yields and len(sides) == 3:
+            # Minor local-street stem meeting a continuous higher-speed main
+            # street (two opposing major arms ~180 deg apart at max_spd > min_spd):
+            # major road flows freely, minor stem gets a Yield sign.
+            min_spd = min(spd for _, spd in side_meta)
+            major_idx = [i for i, (_, spd) in enumerate(side_meta) if spd == max_spd and spd > min_spd]
+            if len(major_idx) == 2:
+                opp = abs(abs(_ang_diff(sides[major_idx[0]]["hdg"], sides[major_idx[1]]["hdg"])) - math.pi)
+                if opp < math.radians(30):
+                    for i in range(3):
+                        actions[i] = "free" if i in major_idx else "yield"
+
+        j_had_stop = j_had_yield = False
+        for side, act in zip(sides, actions):
+            if act == "free":
+                continue
             host = side["host"]
-            sid = f"stop{jid}_{host.road_id}"
+            is_yield = (act == "yield")
+            prefix = "yield" if is_yield else "stop"
+            stype = YIELD_SIGN_TYPE if is_yield else STOP_SIGN_TYPE
+            sname = "YieldSign" if is_yield else "StopSign"
+            sid = f"{prefix}{jid}_{host.road_id}"
             s_pos, t = clear_curb_pose(host, surface_grid)
 
             signals = host.road.find("signals")
@@ -559,15 +719,20 @@ def emit_stop_signs(root: ET.Element, approaches, signalised_junctions,
             sig = ET.SubElement(
                 signals, "signal",
                 s=f"{s_pos:.6f}", t=f"{t:.6f}", id=sid,
-                name=f"StopSign_{jid}_{host.road_id}",
+                name=f"{sname}_{jid}_{host.road_id}",
                 dynamic="no", orientation="-",
-                zOffset=f"{MOUNT_HEIGHT_M:.6f}", country="OpenDRIVE",
-                type=STOP_SIGN_TYPE, subtype="-1", value="-1.0",
+                zOffset=f"{SIGN_MOUNT_HEIGHT_M:.6f}", country="OpenDRIVE",
+                type=stype, subtype="-1", value="-1.0",
                 unit="", height="0.8", width="0.8", text="",
                 hOffset="0.0", pitch="0.0", roll="0.0")
             ET.SubElement(sig, "validity",
                           fromLane=f"-{host.n_lanes}", toLane="-1")
-            n += 1
+            if is_yield:
+                n_yield += 1
+                j_had_yield = True
+            else:
+                n_stop += 1
+                j_had_stop = True
 
             for m in side["members"]:
                 if m.road_id == host.road_id:
@@ -585,8 +750,184 @@ def emit_stop_signs(root: ET.Element, approaches, signalised_junctions,
                     t=f"{mt:.6f}", id=sid, orientation="-")
                 ET.SubElement(ref, "validity",
                               fromLane=f"-{m.n_lanes}", toLane="-1")
-                n_ref += 1
-    return n, n_ref, len(by_junc)
+                if is_yield:
+                    n_yield_ref += 1
+                else:
+                    n_stop_ref += 1
+        if j_had_stop:
+            n_stop_junc += 1
+        if j_had_yield:
+            n_yield_junc += 1
+    return n_stop, n_stop_ref, n_stop_junc, n_yield, n_yield_ref, n_yield_junc
+
+
+VALID_CARLA_SPEEDS_KMH = (30, 40, 50, 60, 70, 80, 90, 100, 110, 120)
+
+
+def emit_speed_limits(root: ET.Element,
+                      surface_grid: RoadSurfaceGrid | None = None) -> tuple[int, int]:
+    """Emit kerbside speed-limit signs (`type="274"`, `country="US"`) at road
+    entries and speed-zone transitions, with `<signalReference>` on sibling
+    parallel lanes so `USpeedLimitComponent` updates `vehicle.get_speed_limit()`
+    and Traffic Manager target speeds across every lane."""
+    roads_by_id = {r.get("id"): r for r in root.findall("road")}
+    # Map (junction_id, successor_ordinary_road_id) -> set of incoming ordinary road speeds
+    junc_in_speeds: dict[tuple[str, str], set[int]] = defaultdict(set)
+    for j in root.findall("junction"):
+        jid = j.get("id")
+        for conn in j.findall("connection"):
+            inc_r = roads_by_id.get(conn.get("incomingRoad"))
+            con_r = roads_by_id.get(conn.get("connectingRoad"))
+            if inc_r is None or con_r is None:
+                continue
+            succ = con_r.find("link/successor")
+            if succ is not None and succ.get("elementType") == "road":
+                out_rid = succ.get("elementId")
+                _, inc_spd = road_speed_info(inc_r)
+                junc_in_speeds[(jid, out_rid)].add(inc_spd)
+
+    candidates = []
+    has_explicit_type = False
+    for road in root.findall("road"):
+        if road.get("junction", "-1") != "-1":
+            continue
+        if road.find("type/speed") is not None:
+            has_explicit_type = True
+        length = float(road.get("length", 0.0))
+        if length < 12.0:
+            continue
+        ls = road.find("lanes/laneSection")
+        if ls is None:
+            continue
+        driving = [l for l in ls.findall("right/lane") if l.get("type") == "driving"]
+        if not driving:
+            continue
+        _, spd = road_speed_info(road)
+        snap_spd = min(VALID_CARLA_SPEEDS_KMH, key=lambda v: abs(v - spd))
+
+        pred = road.find("link/predecessor")
+        need_sign = False
+        if pred is None:
+            need_sign = True
+        elif pred.get("elementType") == "road":
+            pr = roads_by_id.get(pred.get("elementId"))
+            if pr is None or road_speed_info(pr)[1] != spd:
+                need_sign = True
+        elif pred.get("elementType") == "junction":
+            in_spds = junc_in_speeds.get((pred.get("elementId"), road.get("id")), set())
+            if not in_spds or any(s != spd for s in in_spds):
+                need_sign = True
+
+        if not need_sign:
+            continue
+
+        widths = [float(l.find("width").get("a")) for l in driving if l.find("width") is not None]
+        lane_width = widths[0] if widths else 4.0
+        lo = road.find("lanes/laneOffset")
+        lane_offset = float(lo.get("a")) if lo is not None else 0.0
+        s_ref = min(6.0, 0.35 * length)
+        x0, y0, hdg0 = road_point_at_s(road, s_ref)
+        candidates.append({
+            "road": road,
+            "road_id": road.get("id"),
+            "length": length,
+            "n_lanes": len(driving),
+            "lane_offset": lane_offset,
+            "lane_width": lane_width,
+            "speed_kmh": snap_spd,
+            "x": x0,
+            "y": y0,
+            "hdg": hdg0,
+            "s_ref": s_ref,
+        })
+
+    if not has_explicit_type:
+        return 0, 0
+
+    # Group parallel corridor lanes with the same speed limit at their start.
+    same_way = math.radians(25)
+    groups: list[dict] = []
+    claimed: set[str] = set()
+    for c in sorted(candidates, key=lambda d: int(d["road_id"])):
+        if c["road_id"] in claimed:
+            continue
+        near = [(math.hypot(c["x"] - g["host"]["x"], c["y"] - g["host"]["y"]), i)
+                for i, g in enumerate(groups)
+                if g["speed_kmh"] == c["speed_kmh"]
+                and abs(_ang_diff(c["hdg"], g["hdg"])) < same_way]
+        near = [(d, i) for d, i in near if d <= SIDE_JOIN_M]
+        if near:
+            g = groups[min(near)[1]]
+            g["members"].append(c)
+            claimed.add(c["road_id"])
+            continue
+        members = [b for b in candidates if b["road_id"] not in claimed
+                   and b["speed_kmh"] == c["speed_kmh"]
+                   and abs(_ang_diff(b["hdg"], c["hdg"])) < same_way
+                   and math.hypot(b["x"] - c["x"], b["y"] - c["y"]) <= SIDE_RADIUS_M]
+        claimed.update(m["road_id"] for m in members)
+        groups.append({"members": members, "hdg": c["hdg"], "speed_kmh": c["speed_kmh"], "host": members[0]})
+
+    # Pick rightmost kerbside host per corridor group, and suppress duplicate
+    # physical poles within 25 m along the same direction (while still giving
+    # inner/nearby lanes a <signalReference> trigger box!).
+    placed_poles: list[tuple[int, float, float, float, str]] = []
+    n_sig = n_ref = 0
+    for g in groups:
+        sin_h, cos_h = math.sin(g["hdg"]), math.cos(g["hdg"])
+        host = min(
+            g["members"],
+            key=lambda m: -m["x"] * sin_h + m["y"] * cos_h + (m["lane_offset"] - m["n_lanes"] * m["lane_width"]))
+        g["host"] = host
+        kmh = g["speed_kmh"]
+
+        reuse_sid = None
+        for p_kmh, px, py, phdg, psid in placed_poles:
+            if p_kmh == kmh and abs(_ang_diff(host["hdg"], phdg)) < same_way and math.hypot(host["x"] - px, host["y"] - py) <= 22.0:
+                reuse_sid = psid
+                break
+
+        if reuse_sid is None:
+            sid = f"spd{host['road_id']}_{kmh}"
+            s_pos, t = clear_curb_pose_at_start(
+                host["road"], host["length"], host["n_lanes"],
+                host["lane_offset"], host["lane_width"], surface_grid)
+            signals = host["road"].find("signals")
+            if signals is None:
+                signals = ET.SubElement(host["road"], "signals")
+            sig = ET.SubElement(
+                signals, "signal",
+                s=f"{s_pos:.6f}", t=f"{t:.6f}", id=sid,
+                name=f"SpeedLimit_{kmh}_{host['road_id']}",
+                dynamic="no", orientation="-",
+                zOffset=f"{SIGN_MOUNT_HEIGHT_M:.6f}", country="US",
+                type=SPEED_LIMIT_TYPE, subtype=str(kmh), value=f"{float(kmh):.1f}",
+                unit="km/h", height="0.75", width="0.6", text=str(kmh),
+                hOffset="0.0", pitch="0.0", roll="0.0")
+            ET.SubElement(sig, "validity",
+                          fromLane=f"-{host['n_lanes']}", toLane="-1")
+            placed_poles.append((kmh, host["x"], host["y"], host["hdg"], sid))
+            n_sig += 1
+            target_sid = sid
+            ref_members = [m for m in g["members"] if m["road_id"] != host["road_id"]]
+        else:
+            target_sid = reuse_sid
+            ref_members = list(g["members"])
+
+        for m in ref_members:
+            msig = m["road"].find("signals")
+            if msig is None:
+                msig = ET.SubElement(m["road"], "signals")
+            mt = m["lane_offset"] - m["n_lanes"] * m["lane_width"] - POLE_CLEAR_M
+            ref = ET.SubElement(
+                msig, "signalReference",
+                s=f"{m['s_ref']:.6f}", t=f"{mt:.6f}",
+                id=target_sid, orientation="-")
+            ET.SubElement(ref, "validity",
+                          fromLane=f"-{m['n_lanes']}", toLane="-1")
+            n_ref += 1
+
+    return n_sig, n_ref
 
 
 def emit(root: ET.Element, by_junction, verbose=False,
@@ -853,14 +1194,16 @@ def selftest() -> int:
             if g5.min_clearance(px, py) < 0.5:
                 fails.append(f"signal {sg.get('id')} overlaps a driving lane (clearance {g5.min_clearance(px, py):.2f} m)")
 
-    # Unsignalised 3-lane approach: ONE kerbside stop sign on rightmost road 3 +
-    # 2 <signalReference>s on inner roads 1 & 2, clear of every driving lane.
-    r6, _, g6 = run("".join(approach(i, 3.5 * i, 0.0, math.pi / 2) for i in (1, 2, 3)),
+    # Unsignalised 3-lane approach at a 2-arm intersection: ONE kerbside stop sign
+    # on rightmost road 3 + 2 <signalReference>s on inner roads 1 & 2, clear of
+    # every driving lane (a 1-arm diverge fork gets no sign!).
+    r6, _, g6 = run("".join(approach(i, 3.5 * i, 0.0, math.pi / 2) for i in (1, 2, 3))
+                    + approach(4, -8.0, 2.0, 0.0),
                     [], stops=True)
     stop_sigs = [rd.get("id") for rd in r6.findall("road") if rd.find("signals/signal") is not None]
     stop_refs = len(r6.findall("road/signals/signalReference"))
-    if stop_sigs != ["3"] or stop_refs != 2 or len(governed(r6)) != 3:
-        fails.append(f"multi-lane stop sign: expected pole on ['3'] + 2 refs, got {stop_sigs} + {stop_refs} refs")
+    if stop_sigs != ["3", "4"] or stop_refs != 2 or len(governed(r6)) != 4:
+        fails.append(f"multi-lane stop sign: expected poles on ['3', '4'] + 2 refs, got {stop_sigs} + {stop_refs} refs")
     for rd in r6.findall("road"):
         for sg in rd.findall("signals/signal"):
             rx, ry, rhdg = road_point_at_s(rd, float(sg.get("s")))
@@ -868,13 +1211,64 @@ def selftest() -> int:
             if g6.min_clearance(px, py) < 0.5:
                 fails.append(f"stop sign {sg.get('id')} overlaps a driving lane")
 
+    # Freeway unsignalised merge: mainline (>= 80 km/h) flows freely without any
+    # sign, while the 60 km/h on-ramp receives a Yield sign (`205`).
+    fwy_xml = f"""
+      <road name="main" length="50.0" id="1" junction="-1">
+        <link><successor elementType="junction" elementId="9"/></link>
+        <type s="0.0" type="motorway"><speed max="90" unit="km/h"/></type>
+        <planView><geometry s="0.0" x="-50.0" y="0.0" hdg="0.0" length="50.0">
+          <paramPoly3 aU="0.0" bU="50.0" cU="0.0" dU="0.0" aV="0.0" bV="0.0" cV="0.0" dV="0.0" pRange="normalized"/>
+        </geometry></planView>
+        <lanes><laneOffset s="0.0" a="2.0" b="0.0" c="0.0" d="0.0"/>
+          <laneSection s="0.0"><right><lane id="-1" type="driving" level="false">
+          <width sOffset="0.0" a="4.0" b="0.0" c="0.0" d="0.0"/></lane></right></laneSection>
+        </lanes>
+      </road>
+      <road name="ramp" length="50.0" id="2" junction="-1">
+        <link><successor elementType="junction" elementId="9"/></link>
+        <type s="0.0" type="motorway"><speed max="60" unit="km/h"/></type>
+        <planView><geometry s="0.0" x="-48.0" y="-15.0" hdg="0.30" length="50.0">
+          <paramPoly3 aU="0.0" bU="50.0" cU="0.0" dU="0.0" aV="0.0" bV="0.0" cV="0.0" dV="0.0" pRange="normalized"/>
+        </geometry></planView>
+        <lanes><laneOffset s="0.0" a="2.0" b="0.0" c="0.0" d="0.0"/>
+          <laneSection s="0.0"><right><lane id="-1" type="driving" level="false">
+          <width sOffset="0.0" a="4.0" b="0.0" c="0.0" d="0.0"/></lane></right></laneSection>
+        </lanes>
+      </road>
+      <road name="out" length="50.0" id="3" junction="-1">
+        <link><predecessor elementType="junction" elementId="9"/></link>
+        <type s="0.0" type="motorway"><speed max="90" unit="km/h"/></type>
+        <planView><geometry s="0.0" x="10.0" y="0.0" hdg="0.0" length="50.0">
+          <paramPoly3 aU="0.0" bU="50.0" cU="0.0" dU="0.0" aV="0.0" bV="0.0" cV="0.0" dV="0.0" pRange="normalized"/>
+        </geometry></planView>
+        <lanes><laneOffset s="0.0" a="2.0" b="0.0" c="0.0" d="0.0"/>
+          <laneSection s="0.0"><right><lane id="-1" type="driving" level="false">
+          <width sOffset="0.0" a="4.0" b="0.0" c="0.0" d="0.0"/></lane></right></laneSection>
+        </lanes>
+      </road>"""
+    r7 = ET.fromstring(f"<OpenDRIVE>{fwy_xml}<junction id=\"9\" name=\"j9\"/></OpenDRIVE>")
+    g7 = RoadSurfaceGrid(r7)
+    aps7 = collect_approaches(r7)
+    emit_stop_signs(r7, aps7, set(), surface_grid=g7)
+    emit_speed_limits(r7, surface_grid=g7)
+    r1_types = [sg.get("type") for sg in r7.find("road[@id='1']").findall("signals/signal")]
+    r2_types = [sg.get("type") for sg in r7.find("road[@id='2']").findall("signals/signal")]
+    r3_types = [sg.get("type") for sg in r7.find("road[@id='3']").findall("signals/signal")]
+    if STOP_SIGN_TYPE in r1_types or YIELD_SIGN_TYPE in r1_types:
+        fails.append(f"mainline freeway road 1 must not get a stop/yield sign, got {r1_types}")
+    if YIELD_SIGN_TYPE not in r2_types:
+        fails.append(f"on-ramp road 2 should get a Yield sign ({YIELD_SIGN_TYPE}), got {r2_types}")
+    if SPEED_LIMIT_TYPE not in r3_types:
+        fails.append(f"outgoing motorway road 3 should get a SpeedLimit sign ({SPEED_LIMIT_TYPE}), got {r3_types}")
+
     if fails:
         print("SELFTEST FAILED")
         for f in fails:
             print("  -", f)
         return 1
     print("selftest passed - crossroads signal, validity -1..-1, controller "
-          "bound to its junction")
+          "bound to its junction, yield & speed-limit signs verified")
     return 0
 
 
@@ -884,10 +1278,9 @@ def main() -> int:
     ap.add_argument("lights", nargs="?")
     ap.add_argument("-o", "--output", default=None)
     ap.add_argument("--no-stop-signs", action="store_true",
-                    help="do not emit stop signs at the junctions that have no "
-                         "traffic light. They are Epic's stop-sign "
-                         "intersections (MassTraffic's bHasTrafficLights is "
-                         "false for exactly these), so they are on by default")
+                    help="do not emit stop/yield signs at unsignalised junctions")
+    ap.add_argument("--no-speed-limits", action="store_true",
+                    help="do not emit speed-limit signs at road-class transitions")
     ap.add_argument("--no-complete-junctions", action="store_true",
                     help="leave approaches to a signalised junction that no "
                          "authored light binds to WITHOUT any control, as "
@@ -916,10 +1309,15 @@ def main() -> int:
     joined, added = (0, 0) if args.no_complete_junctions else complete_sides(
         approaches, by_junction)
     n_sig, n_ref, n_ctl = emit(root, by_junction, surface_grid=surface_grid)
-    n_stop, n_stop_ref, n_stop_junc = (
-        (0, 0, 0)
+    n_stop, n_stop_ref, n_stop_junc, n_yield, n_yield_ref, n_yield_junc = (
+        (0, 0, 0, 0, 0, 0)
         if args.no_stop_signs
         else emit_stop_signs(root, approaches, set(by_junction), surface_grid=surface_grid)
+    )
+    n_spd, n_spd_ref = (
+        (0, 0)
+        if args.no_speed_limits
+        else emit_speed_limits(root, surface_grid=surface_grid)
     )
 
     # Check how many emitted <signal> poles still sit inside any driving lane.
@@ -953,6 +1351,9 @@ def main() -> int:
     print(f"  uncontrolled approaches at signalised junctions: {bare:,}")
     print(f"  stop signs emitted    : {n_stop:,} (+ {n_stop_ref:,} lane refs) "
           f"across {n_stop_junc:,} unsignalised junctions")
+    print(f"  yield signs emitted   : {n_yield:,} (+ {n_yield_ref:,} lane refs) "
+          f"across {n_yield_junc:,} merge junctions")
+    print(f"  speed limits emitted  : {n_spd:,} (+ {n_spd_ref:,} lane refs)")
     print(f"  poles inside lanes    : {in_lane:,}")
     if not n_sig:
         print("  NO SIGNALS EMITTED - check the lights file matches this map",
