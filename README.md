@@ -8,10 +8,10 @@ CARLA traffic, real CARLA sensors.
 
 ![CARLA driving through the City Sample, four sensors at once](docs/citysample-carla.gif)
 
-*Four synchronised CARLA sensors on Epic's City Sample: RGB, semantic
-segmentation, depth, and a top-down LiDAR sweep. Every panel is a thing that
-returned nothing at all before the fixes in this repository. Recorded with
-`python tools/record_carla.py --gif` — the full 26-second clip is
+*Four synchronised CARLA 1.0 sensors on Epic's City Sample (`Big_City_LVL`):
+RGB, semantic segmentation, depth, and a top-down LiDAR sweep. Every panel is a
+thing that returned nothing at all before the fixes in this repository.
+Recorded with `python tools/record_carla.py --gif` — the full 3-minute drive is
 [docs/citysample-carla.mp4](docs/citysample-carla.mp4).*
 
 There are two halves, and you can stop after the first:
@@ -21,21 +21,23 @@ There are two halves, and you can stop after the first:
 | **A. Road network** | The city's roads as an ASAM **OpenDRIVE** `.xodr`. Drives in any CARLA. | An afternoon. Only needs UE 5.8 + City Sample. |
 | **B. The whole city** | CARLA serving the City Sample level itself — buildings, props, lighting. | Also needs CARLA built from source against its UE 5.8 fork. |
 
-**Validated on `Small_City_LVL` (CARLA 1.0):** 3,337 roads · 172 junctions
-(`2,263` entries) · 145 km · 4,672 spawn points · 58/58 autopilot vehicles
-surviving (54 moving at a median 30 km/h).
+**Validated on `Small_City_LVL` and `Big_City_LVL` (CARLA 1.0):**
+- **`Small_City_LVL`** (`1.66 × 1.30 km`): 3,497 roads · 172 junctions (`2,263` entries) · 145 km · 4,672 spawn points · 58/58 autopilot vehicles surviving.
+- **`Big_City_LVL`** (`4.16 × 4.99 km`): 23,594 roads · 1,236 junctions (`16,218` entries) · 1,197.5 km · 33,590 spawn points · 60/60 autopilot vehicles surviving.
 
 Background: [carla#9852](https://github.com/carla-simulator/carla/issues/9852).
 
 **CARLA 1.0 status.** Built from source (`3ea166118d2c` against engine fork
-`b76fce0e3bcb` and content `55228c1ccca1`) and verified end-to-end on
-`Small_City_LVL`: road routing (`200/200` 500 m walks), Traffic Manager
-(`58/58` alive, `354/408` red-light stops), 355 traffic lights across 106
-junctions, 217 stop signs, 605-tile pedestrian navmesh (`30/30` walkers
-moving), Mass traffic and crowd bridge (`250` proxies, full turnover on
-spectator relocation), RGB/depth/segmentation cameras (`0.1–0.5 %` unlabeled
-once settled), semantic and plain LiDAR (`2.9 %` unlabeled, zero ego
-self-hits), radar (`1,980` detections), `ground_projection`, and `cast_ray`.
+`b76fce0e3bcb` and content `55228c1ccca1`) and verified end-to-end on both
+`Small_City_LVL` and `Big_City_LVL`: road routing (`200/200` 500 m walks on
+each map), Traffic Manager (`58/58` and `60/60` alive), 355 / 2,176 traffic
+lights across 106 / 619 junctions, 209 / 2,133 kerbside stop signs (`0` signal
+or stop-sign poles overlapping driving lanes), 605-tile and 5,495-tile
+pedestrian navmeshes (`30/30` and `27/30` walkers moving), Mass traffic and
+crowd bridge (`250` proxies, full turnover on spectator relocation),
+RGB/depth/segmentation cameras, semantic and plain LiDAR (`0.26–2.9 %`
+unlabeled, zero ego self-hits), radar (`1,980` and `2,947` detections),
+`ground_projection`, and `cast_ray`.
 
 > ### ⚠ Read this before collecting any data
 >
@@ -117,13 +119,15 @@ Copy `CityRoadExport/` into your City Sample project's `Plugins/`, then:
 "C:\Program Files\Epic Games\UE_5.8\Engine\Binaries\Win64\UnrealEditor-Win64-DebugGame-Cmd.exe" "<path>\CitySample.uproject" -run=ExportZoneGraph -Map=/Game/Map/Small_City_LVL -Out="C:\full\path\to\this\repo\zonegraph.json" -unattended -nosound -nullrhi
 ```
 
+Pass `-Map=/Game/Map/Big_City_LVL` to export Big City instead (`91,288` lanes, ~362 MB of JSON).
+
 **Give `-Out` an absolute path.** Unreal resolves relative paths against the
 process working directory, which the engine sets to its own `Binaries\Win64`
 folder during startup — so a bare `-Out=zonegraph.json` writes into
 `C:\Program Files\...`, if it can write there at all, and step 3 then fails with
 `FileNotFoundError`.
 
-A few minutes, ~50 MB of JSON. Success looks like `Wrote ... -- N lanes` at the
+A few minutes, ~50 MB of JSON for Small City (~362 MB for Big City). Success looks like `Wrote ... -- N lanes` at the
 end of the commandlet's output.
 
 ### Step 3 — convert to OpenDRIVE
@@ -217,7 +221,7 @@ The script uses `CARLA_UNREAL_ENGINE_PATH` or `CARLA_UE_DIR` for the built engin
 powershell -File tools\Integrate-CarlaIntoCitySample.ps1
 ```
 
-Close Unreal Editor before integration. The script selects the source patch, copies the plugins, links the CARLA assets, and updates the project configuration. `-CheckOnly` checks the revisions, patch, build inputs, and supplied road files without changing either checkout. Supply `-OpenDrive` and `-NavMesh` to use exports outside the repository. The preflight rejects OpenDRIVE files with overlapping road and junction IDs.
+Close Unreal Editor before integration. The script selects the source patch, copies the plugins, links the CARLA assets, and updates the project configuration. `-CheckOnly` checks the revisions, patch, build inputs, and supplied road files without changing either checkout. Supply `-OpenDrive` / `-NavMesh` (for `Small_City_LVL`) and `-BigCityOpenDrive` / `-BigCityNavMesh` (for `Big_City_LVL`) to use exports outside the repository, or place `SmallCity-signals.xodr`, `SmallCity.bin`, `BigCity-signals.xodr`, and `BigCity.bin` in the repo root. The preflight rejects OpenDRIVE files with overlapping road and junction IDs.
 
 Original project settings are backed up as `*.pre-carla.bak`. `-Undo` restores those settings and removes the copied plugins, asset link, and deployed road and navmesh files. The source patch and engine registration can be reversed separately.
 
@@ -238,7 +242,8 @@ powershell -File tools\Run-CarlaCity.ps1 -Configuration DebugGame
 ### Step 5 — run
 
 ```bash
-powershell -File tools\Run-CarlaCity.ps1
+powershell -File tools\Run-CarlaCity.ps1                     # Small_City_LVL (default)
+powershell -File tools\Run-CarlaCity.ps1 -Map Big_City_LVL   # Big_City_LVL
 ```
 
 Waits until port 2000 actually accepts a connection before returning.
@@ -246,7 +251,8 @@ Waits until port 2000 actually accepts a connection before returning.
 > **The first run takes 1–2 hours** and looks like a hang. It is not: with a
 > cold derived-data cache Unreal compiles City Sample's Nanite meshes, distance
 > fields, animations and 8K Megascans textures. Watch
-> `logs/run-carlacity.log` grow. **Subsequent runs take about 60 seconds.**
+> `logs/run-carlacity.log` grow. **Subsequent runs take about 60 seconds** on
+> `Small_City_LVL` (~5 minutes to first world tick on `Big_City_LVL`).
 >
 > It also writes about **75 GB of derived data** that nothing warns you about:
 > 30.7 GB in the project's `DerivedDataCache`, 14.8 GB `Intermediate`,
@@ -285,6 +291,8 @@ python tools/masstraffic_lights_to_json.py "<CitySample>/Content/AI/Traffic/Traf
 python tools/add_signals_to_xodr.py SmallCity.xodr lights.json -o SmallCity-signals.xodr
 copy SmallCity-signals.xodr "<CitySample>\Saved\OpenDrive\Small_City_LVL.xodr"
 ```
+
+For `Big_City_LVL`, harvest `CitySampleBigCityTrafficLights.uasset` (`2,218` lights) and write `Saved\OpenDrive\Big_City_LVL.xodr`.
 
 Restart the server, then check it:
 
@@ -852,7 +860,8 @@ map               : Map/Small_City_LVL
 topology / spawns : 4,672 segments, 2,263 junction entries, 4,672 spawn points
 route reach       : 200/200 random walks reached 500 m
 traffic manager   : 58/60 spawned, 58/58 alive, 54 moving (median 30 km/h, max 46)
-signals           : 355 traffic lights (106 groups, cycling), 217 stop signs,
+signals           : 355 traffic lights (106 groups, cycling), 209 kerbside stop signs
+                    (+ 20 lane refs, 0 poles overlapping driving lanes, was 239),
                     354/408 red-light samples stationary (87%)
 mass bridge       : 250 dormant proxies (150 vehicles, 100 walkers), both moving,
                     250/250 replaced after a 1,447 m spectator move
@@ -863,6 +872,31 @@ sensors           : unparented semantic LiDAR 232,596 pts (2.9% Unlabeled),
 segmentation      : 0.5% then 0.1% Unlabeled across settled 800x600 runs
                     (0.00% pixels > 29; 214 FastGeo containers, 106,949 seen, 0 unmatched)
 walkers           : 605-tile navmesh, 20/20 random points, 30/30 walkers moved (median 20.9 m)
+```
+
+And serving **`Big_City_LVL`** (`4.16 × 4.99 km`):
+
+```
+map               : Map/Big_City_LVL
+road export       : 23,594 roads (7,372 ordinary + 16,222 connecting), 1,236 junctions,
+                    1,197.50 km, 8,310 crosswalks, 0 dead ends into a junction
+topology / spawns : 33,590 segments, 16,218 junction entries, 33,590 spawn points
+route reach       : 200/200 random walks reached 500 m
+traffic manager   : 60/60 spawned, 60/60 alive, 57 moving (median 30 km/h, max 46)
+signals           : 2,176 traffic lights (619 groups, 5 phase patterns cycling),
+                    2,133 kerbside stop signs (+ 8 lane refs, 0 poles overlapping
+                    driving lanes, was 1,322), 6,222 landmarks, 27/53 red-light stationary (51%)
+mass bridge       : 250 dormant proxies (150 vehicles, 100 walkers), both moving,
+                    250/250 replaced after a 4,529 m spectator move
+sensors           : unparented semantic LiDAR 273,492 pts (0.26% Unlabeled),
+                    attached LiDAR 283,548 pts (0 ego self-hits),
+                    plain LiDAR 150,043 pts, radar 2,947 detections,
+                    ground_projection + cast_ray (4 roadway hits) PASS
+segmentation      : 6.9% Unlabeled at (0, 0) where open sky atmosphere has no mesh,
+                    2.7% at (703, 296) (0.00% pixels > 29; 4,519 FastGeo containers,
+                    1,113,458 seen, 1,110,973 matched)
+walkers           : 5,495-tile navmesh (56.1 MB), 20/20 random points across 3.6 x 3.6 km,
+                    30/30 spawned, 27/30 moved > 1 m (median 20.6 m)
 ```
 
 Earlier baseline on legacy CARLA 0.10.0 (`de3f38e64`, pre-junction-id export):
@@ -1065,9 +1099,11 @@ Everything here was measured on the running server, not inferred.
   of its custom primitive data, and the shader reads that as a label — so it
   appears as nonsense labels above 29, not as `Unlabeled`.
   `segmentation_census.py` detects this and refuses to report a number.
-- **`Big_City_LVL` is not exported.** It dies during world load, and
-  `Integrate-*.ps1` only ever installs `Small_City_LVL.xodr`, so
-  `Run-CarlaCity.ps1 -Map Big_City_LVL` would load geometry with no CARLA map.
+- **Open sky atmosphere renders as `Unlabeled` (`0`) rather than `Sky` (`11`).**
+  City Sample renders its sky via `USkyAtmosphereComponent` rather than a static
+  sky dome mesh, so camera pixels at the far plane carry label `0` (~0.1–0.5 %
+  on `Small_City_LVL` at `(0, 0)`, ~6.9 % looking down the wider canyon at
+  `(0, 0)` on `Big_City_LVL`).
 
 ### Ordinary limitations
 
@@ -1102,3 +1138,4 @@ that are CARLA's rather than ours are written up in
 | `get_random_location_from_navigation()` always `None` | 608 navmesh tiles, walkers walk | `carla_walkers.py` |
 | `ground_projection()` / `project_point()` returned `None` | real locations | `verify_sensors.py` |
 | the server asserted and died mid-run under streaming | no assertions | any of the above |
+| `Big_City_LVL` unexported (`17` untagged sidewalk shapes leaked into roads) | `23,594` roads, `1,236` junctions, `2,176` lights, `5,495` navmesh tiles, `60/60` TM alive | `Run-CarlaCity.ps1 -Map Big_City_LVL` |

@@ -20,8 +20,8 @@
       CitySample.uproject                                  plugins + module + engine
       Config/DefaultEngine.ini                             game instance / mode
       Source/CitySampleEditor.Target.cs                    extra module
-      Saved/OpenDrive/Small_City_LVL.xodr                  the exported roads
-      Content/Map/Nav/Small_City_LVL.bin                   the pedestrian navmesh
+      Saved/OpenDrive/{Small,Big}_City_LVL.xodr            the exported roads
+      Content/Map/Nav/{Small,Big}_City_LVL.bin             the pedestrian navmeshes
 
     Run it again after editing anything under CARLA's own tree or under
     plugins/CarlaMassBridge: the project holds COPIES, so a rebuild without a
@@ -36,10 +36,16 @@
     Check the source, assets, patch and map inputs without changing either checkout.
 
 .PARAMETER OpenDrive
-    Optional path to the exported OpenDRIVE file to install.
+    Optional path to the exported Small_City_LVL OpenDRIVE file to install.
 
 .PARAMETER NavMesh
-    Optional path to the matching Recast navmesh to install.
+    Optional path to the matching Small_City_LVL Recast navmesh to install.
+
+.PARAMETER BigCityOpenDrive
+    Optional path to the exported Big_City_LVL OpenDRIVE file to install.
+
+.PARAMETER BigCityNavMesh
+    Optional path to the matching Big_City_LVL Recast navmesh to install.
 
 .EXAMPLE
     powershell -File tools\Integrate-CarlaIntoCitySample.ps1
@@ -56,12 +62,14 @@ param(
                        else { "C:\carla-ue58\UnrealEngine5_carla" }),
     [string] $OpenDrive,
     [string] $NavMesh,
+    [string] $BigCityOpenDrive,
+    [string] $BigCityNavMesh,
     [switch] $CheckOnly,
     [switch] $Undo
 )
 
 $ErrorActionPreference = "Stop"
-$CitySample = (Resolve-Path -LiteralPath $CitySample).Path
+$CitySample = (Get-Item -LiteralPath $CitySample -Force).FullName
 
 $PLUGINS = @("Carla", "CarlaTools", "CarlaExporter", "StreetMap")
 $MODULE  = "CarlaDeviceProfileSelector"
@@ -166,7 +174,9 @@ if ($Undo) {
     # take them back out - leaving them behind would make an "un-integrated"
     # project still behave like a CARLA one.
     foreach ($f in @("Saved\OpenDrive\Small_City_LVL.xodr",
-                     "Content\Map\Nav\Small_City_LVL.bin")) {
+                     "Saved\OpenDrive\Big_City_LVL.xodr",
+                     "Content\Map\Nav\Small_City_LVL.bin",
+                     "Content\Map\Nav\Big_City_LVL.bin")) {
         $p = Join-Path $CitySample $f
         if (Test-Path $p) { Remove-Item $p -Force; Ok "removed $f" }
     }
@@ -265,38 +275,70 @@ try {
 }
 if ($patchApplied) { Ok "CARLA patch already applied" } else { Ok "CARLA patch applies cleanly" }
 
-$deployedXodr = Join-Path $CitySample "Saved\OpenDrive\Small_City_LVL.xodr"
-$deployedNav = Join-Path $CitySample "Content\Map\Nav\Small_City_LVL.bin"
-$xodrSrc = $OpenDrive
-if (-not $xodrSrc) {
-    foreach ($name in @("SmallCity-signals.xodr", "SmallCity.xodr")) {
-        $candidate = Join-Path $PSScriptRoot "..\$name"
-        if (Test-Path -LiteralPath $candidate -PathType Leaf) { $xodrSrc = $candidate; break }
+$mapSpecs = @(
+    @{
+        MapName      = "Small_City_LVL"
+        Prefix       = "SmallCity"
+        XodrParam    = $OpenDrive
+        NavParam     = $NavMesh
+        DeployedXodr = (Join-Path $CitySample "Saved\OpenDrive\Small_City_LVL.xodr")
+        DeployedNav  = (Join-Path $CitySample "Content\Map\Nav\Small_City_LVL.bin")
+        XodrSrc      = $null
+        NavSrc       = $null
+        NavBytes     = 0
+        SignalCount  = 0
+    },
+    @{
+        MapName      = "Big_City_LVL"
+        Prefix       = "BigCity"
+        XodrParam    = $BigCityOpenDrive
+        NavParam     = $BigCityNavMesh
+        DeployedXodr = (Join-Path $CitySample "Saved\OpenDrive\Big_City_LVL.xodr")
+        DeployedNav  = (Join-Path $CitySample "Content\Map\Nav\Big_City_LVL.bin")
+        XodrSrc      = $null
+        NavSrc       = $null
+        NavBytes     = 0
+        SignalCount  = 0
     }
-}
-$navSrc = $NavMesh
-if (-not $navSrc) {
-    $candidate = Join-Path $PSScriptRoot "..\SmallCity.bin"
-    if (Test-Path -LiteralPath $candidate -PathType Leaf) { $navSrc = $candidate }
-}
+)
 
-$xodrCheck = $xodrSrc
-if (-not $xodrCheck -and (Test-Path -LiteralPath $deployedXodr -PathType Leaf)) { $xodrCheck = $deployedXodr }
-if ($xodrCheck) {
-    $xml = New-Object System.Xml.XmlDocument
-    $xml.Load((Resolve-Path -LiteralPath $xodrCheck).Path)
-    $ids = [System.Collections.Generic.HashSet[string]]::new()
-    foreach ($road in $xml.SelectNodes('/OpenDRIVE/road')) { $null = $ids.Add($road.GetAttribute('id')) }
-    if ($ids.Count -eq 0) { throw "No OpenDRIVE roads in $xodrCheck." }
-    $collisions = @($xml.SelectNodes('/OpenDRIVE/junction') | Where-Object { $ids.Contains($_.GetAttribute('id')) })
-    if ($collisions.Count -gt 0) {
-        throw "$xodrCheck contains $($collisions.Count) overlapping road and junction IDs. Regenerate the OpenDRIVE file."
+foreach ($ms in $mapSpecs) {
+    $xodrSrc = $ms.XodrParam
+    if (-not $xodrSrc) {
+        foreach ($name in @("$($ms.Prefix)-signals.xodr", "$($ms.Prefix).xodr")) {
+            $candidate = Join-Path $PSScriptRoot "..\$name"
+            if (Test-Path -LiteralPath $candidate -PathType Leaf) { $xodrSrc = $candidate; break }
+        }
     }
-    Ok "OpenDRIVE road and junction IDs are disjoint"
-}
-if ($navSrc) {
-    $navBytes = (Get-Item -LiteralPath $navSrc).Length
-    if ($navBytes -le 64) { throw "The Recast mesh at $navSrc is empty. Rebuild it from the OpenDRIVE file." }
+    $navSrc = $ms.NavParam
+    if (-not $navSrc) {
+        $candidate = Join-Path $PSScriptRoot "..\$($ms.Prefix).bin"
+        if (Test-Path -LiteralPath $candidate -PathType Leaf) { $navSrc = $candidate }
+    }
+    $ms.XodrSrc = $xodrSrc
+    $ms.NavSrc = $navSrc
+
+    $xodrCheck = $xodrSrc
+    if (-not $xodrCheck -and (Test-Path -LiteralPath $ms.DeployedXodr -PathType Leaf)) {
+        $xodrCheck = $ms.DeployedXodr
+    }
+    if ($xodrCheck) {
+        $xml = New-Object System.Xml.XmlDocument
+        $xml.Load((Resolve-Path -LiteralPath $xodrCheck).Path)
+        $ids = [System.Collections.Generic.HashSet[string]]::new()
+        foreach ($road in $xml.SelectNodes('/OpenDRIVE/road')) { $null = $ids.Add($road.GetAttribute('id')) }
+        if ($ids.Count -eq 0) { throw "No OpenDRIVE roads in $xodrCheck." }
+        $collisions = @($xml.SelectNodes('/OpenDRIVE/junction') | Where-Object { $ids.Contains($_.GetAttribute('id')) })
+        if ($collisions.Count -gt 0) {
+            throw "$xodrCheck contains $($collisions.Count) overlapping road and junction IDs. Regenerate the OpenDRIVE file."
+        }
+        $ms.SignalCount = $xml.SelectNodes('/OpenDRIVE/road/signals/signal').Count
+        Ok "$($ms.MapName) OpenDRIVE road and junction IDs are disjoint"
+    }
+    if ($navSrc) {
+        $ms.NavBytes = (Get-Item -LiteralPath $navSrc).Length
+        if ($ms.NavBytes -le 64) { throw "The Recast mesh at $navSrc is empty. Rebuild it from the OpenDRIVE file." }
+    }
 }
 
 # UBT reads these files from each plugin. Generate them before copying.
@@ -624,22 +666,23 @@ Say "`n=== 8/10 installing the extracted road network ===" "Cyan"
 # ahead of the content directory, so the extracted network drops in there under
 # the level's own name and needs no cooking or asset import.
 #
-# Prefer SmallCity-signals.xodr when it exists. add_signals_to_xodr.py writes
+# Prefer <City>-signals.xodr when it exists. add_signals_to_xodr.py writes
 # the traffic lights into that file and leaves the raw export alone, so
 # installing the raw one silently turns every traffic light back off - the
 # lights are only in the .xodr, nowhere else.
-if ($xodrSrc) {
-    $savedDir = Split-Path $deployedXodr -Parent
-    if (-not (Test-Path $savedDir)) { New-Item -ItemType Directory -Path $savedDir -Force | Out-Null }
-    $xodrSrc = (Resolve-Path -LiteralPath $xodrSrc).Path
-    if ($xodrSrc -ne $deployedXodr) { Copy-Item -LiteralPath $xodrSrc -Destination $deployedXodr -Force }
-    $nSignals = $xml.SelectNodes('/OpenDRIVE/road/signals/signal').Count
-    Ok "Saved\OpenDrive\Small_City_LVL.xodr  ($(Split-Path $xodrSrc -Leaf), $nSignals signals)"
-    if ($nSignals -eq 0) {
-        Note "no traffic lights in that file - see README part B step 8 to add them"
+foreach ($ms in $mapSpecs) {
+    if ($ms.XodrSrc) {
+        $savedDir = Split-Path $ms.DeployedXodr -Parent
+        if (-not (Test-Path $savedDir)) { New-Item -ItemType Directory -Path $savedDir -Force | Out-Null }
+        $resolvedSrc = (Resolve-Path -LiteralPath $ms.XodrSrc).Path
+        if ($resolvedSrc -ne $ms.DeployedXodr) { Copy-Item -LiteralPath $resolvedSrc -Destination $ms.DeployedXodr -Force }
+        Ok "Saved\OpenDrive\$($ms.MapName).xodr  ($(Split-Path $resolvedSrc -Leaf), $($ms.SignalCount) signals)"
+        if ($ms.SignalCount -eq 0) {
+            Note "no traffic lights in $($ms.MapName).xodr - see README part B step 8 to add them"
+        }
+    } elseif (-not (Test-Path -LiteralPath $ms.DeployedXodr -PathType Leaf)) {
+        Note "$($ms.Prefix).xodr not found - run the export pipeline to enable $($ms.MapName)"
     }
-} elseif (-not $xodrCheck) {
-    Note "SmallCity.xodr not found - run the export pipeline first (see README part A)"
 }
 
 Say "`n=== 9/10 installing the pedestrian navmesh ===" "Cyan"
@@ -648,14 +691,16 @@ Say "`n=== 9/10 installing the pedestrian navmesh ===" "Cyan"
 # and that RPC only searches Saved/ for generated OpenDRIVE worlds; for a map
 # that already exists it walks the map's CONTENT folder and nothing else. A .bin
 # in Saved\Nav\ is ignored without a word in any log, on either side.
-if ($navSrc) {
-    $navDir = Split-Path $deployedNav -Parent
-    if (-not (Test-Path $navDir)) { New-Item -ItemType Directory -Path $navDir -Force | Out-Null }
-    $navSrc = (Resolve-Path -LiteralPath $navSrc).Path
-    if ($navSrc -ne $deployedNav) { Copy-Item -LiteralPath $navSrc -Destination $deployedNav -Force }
-    Ok "Content\Map\Nav\Small_City_LVL.bin  ($('{0:N0}' -f $navBytes) bytes)"
-} elseif (-not (Test-Path -LiteralPath $deployedNav -PathType Leaf)) {
-    Note "SmallCity.bin not found - walkers will not move; see README part B step 11"
+foreach ($ms in $mapSpecs) {
+    if ($ms.NavSrc) {
+        $navDir = Split-Path $ms.DeployedNav -Parent
+        if (-not (Test-Path $navDir)) { New-Item -ItemType Directory -Path $navDir -Force | Out-Null }
+        $resolvedNav = (Resolve-Path -LiteralPath $ms.NavSrc).Path
+        if ($resolvedNav -ne $ms.DeployedNav) { Copy-Item -LiteralPath $resolvedNav -Destination $ms.DeployedNav -Force }
+        Ok "Content\Map\Nav\$($ms.MapName).bin  ($('{0:N0}' -f $ms.NavBytes) bytes)"
+    } elseif (-not (Test-Path -LiteralPath $ms.DeployedNav -PathType Leaf)) {
+        Note "$($ms.Prefix).bin not found - walkers on $($ms.MapName) need a Recast navmesh; see README part B step 11"
+    }
 }
 
 Say "`n=== done ===" "Cyan"
