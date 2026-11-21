@@ -131,6 +131,8 @@ class Road:
     unidirectional: bool = False
     has_center_divider: bool = False
     is_freeway: bool = False
+    road_type: str = "town"
+    speed_kmh: float = 30.0
     lane_count: int = 1
     predecessor: dict | None = None
     successor: dict | None = None
@@ -199,6 +201,8 @@ def build_road(spec: dict, numeric_id: int) -> Road | None:
         unidirectional=bool(spec.get("unidirectional", False)),
         has_center_divider=bool(spec.get("has_center_divider", False)),
         is_freeway=bool(spec.get("is_freeway", False)),
+        road_type=str(spec.get("road_type") or ("motorway" if spec.get("is_freeway") else "town")),
+        speed_kmh=float(spec.get("speed_kmh", 80.0 if spec.get("is_freeway") else 30.0)),
         lane_count=max(1, int(spec.get("lane_count", 1))),
         predecessor=spec.get("predecessor"),
         successor=spec.get("successor"),
@@ -523,6 +527,10 @@ def to_xodr(net: dict, name: str = "CitySample") -> ET.ElementTree:
                               elementId=str(id_map[str(eid)]),
                               contactPoint=spec.get("contact", "start"))
 
+        if r.lane_type == "driving" and r.speed_kmh > 0.0:
+            rtype = ET.SubElement(rd, "type", s="0.0", type=r.road_type)
+            ET.SubElement(rtype, "speed", max=f"{r.speed_kmh:.0f}", unit="km/h")
+
         pv = ET.SubElement(rd, "planView")
         for g in r.geometries:
             ge = ET.SubElement(pv, "geometry", s=f"{g.s:.6f}", x=f"{g.x:.6f}",
@@ -798,13 +806,18 @@ def selftest() -> int:
     # A pedestrian lane kept with --keep-sidewalks is a SIDEWALK. Written as
     # "driving", CARLA would route and spawn traffic on it.
     walk = to_xodr({"roads": [dict(one_lane("P", 0, 0, 5000, 0), lane_type="sidewalk"),
-                              dict(one_lane("R", 0, 900, 5000, 900), lane_type="exit")]},
+                              dict(one_lane("R", 0, 900, 5000, 900), lane_type="exit",
+                                   is_freeway=True, road_type="motorway", speed_kmh=60.0)]},
                    name="lane-types").getroot()
     types = {r.get("name"): r.find("lanes/laneSection/right/lane").get("type")
              for r in walk.findall("road")}
     if types != {"P": "sidewalk", "R": "driving"}:
         failures.append(f"lane types written {types}; a pedestrian lane must be "
                         "'sidewalk' and a ramp must stay 'driving'")
+    ramp_rd = next(r for r in walk.findall("road") if r.get("name") == "R")
+    ramp_sp = ramp_rd.find("type/speed")
+    if ramp_rd.find("type") is None or ramp_sp is None or ramp_sp.get("max") != "60":
+        failures.append("expected <type type='motorway'><speed max='60' unit='km/h'/></type> on ramp")
 
     # Lanes: bidirectional road gets one left, one right, one centre.
     sec = roads[0].find("lanes/laneSection")

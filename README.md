@@ -26,58 +26,64 @@ There are two halves, and you can stop after the first:
 
 Background: [carla#9852](https://github.com/carla-simulator/carla/issues/9852).
 
-**CARLA 1.0 status.** Built from source (`3ea166118d2c` against engine fork
-`b76fce0e3bcb` and content `55228c1ccca1`) and verified end-to-end on both
+**CARLA 1.0 status (`v1.1.0`).** Built from source (`3ea166118d2c` against engine
+fork `b76fce0e3bcb` and content `55228c1ccca1`) and verified end-to-end on both
 `Small_City_LVL` and `Big_City_LVL`: road routing (`200/200` 500 m walks on
-each map), Traffic Manager (`58/58` and `60/60` alive), 355 / 2,176 traffic
-lights across 106 / 619 junctions, 209 / 2,133 kerbside stop signs (`0` signal
-or stop-sign poles overlapping driving lanes), 605-tile and 5,495-tile
-pedestrian navmeshes (`30/30` and `27/30` walkers moving), Mass traffic and
-crowd bridge (`250` proxies, full turnover on spectator relocation),
-RGB/depth/segmentation cameras, semantic and plain LiDAR (`0.26–2.9 %`
-unlabeled, zero ego self-hits), radar (`1,980` and `2,947` detections),
-`ground_projection`, and `cast_ray`.
+each map), Traffic Manager (`55/55` and `59/59` alive alongside 250 live Mass
+proxies, reaching `79 km/h` on the `90 km/h` freeways), 355 / 2,176 traffic
+lights across 106 / 619 junctions, 193 / 2,107 kerbside stop signs, 2 / 7
+kerbside yield signs, 197 / 1,356 US MUTCD speed-limit signs (`0` poles
+overlapping driving lanes; live `vehicle.get_speed_limit()` trigger updates
+verified), 620-tile and 5,591-tile pedestrian navmeshes built directly from
+Epic's `7,846` and `59,384` measured ZoneGraph pedestrian lanes (`1` connected
+walkable island on each map; `30/30` walkers moving on both), Mass traffic and
+crowd bridge (`250` proxies centered on `role_name="hero"`), out-of-the-box
+camera semantic segmentation (`0.2 %` and `0.4 %` unlabeled with `Sky` fixed)
+and semantic LiDAR (`1.26 %` unlabeled on both maps, zero ego self-hits), radar
+(`1,980` and `2,941` detections), `ground_projection`, `cast_ray`, and CARLA
+1.0's **NVIDIA NuRec (`NRE 26.04.01` / 3DGUT)** photorealistic neural rendering
+pipeline (§11).
 
 > ### ⚠ Read this before collecting any data
 >
-> **Working on both `Small_City_LVL` and `Big_City_LVL` (CARLA 1.0)** — cameras,
-> depth, GNSS, IMU, collision sensors, vehicle control, **LiDAR, radar,
+> **Working out of the box on both `Small_City_LVL` and `Big_City_LVL` (CARLA 1.0)** —
+> cameras, depth, GNSS, IMU, collision sensors, vehicle control, **LiDAR, radar,
 > `ground_projection`, `cast_ray`**, **355 / 2,176 traffic lights** across
-> 106 / 619 junctions and **209 / 2,133 kerbside stop signs** across the other
-> 66 / 615 (`0` poles in driving lanes), **1,096 / 8,310 crosswalks**, **camera
-> semantic segmentation** (`0.1–0.5 %` unlabeled on `Small_City_LVL`; `2.7–6.9 %`
-> on `Big_City_LVL` where open sky atmosphere has no mesh), **semantic LiDAR**
-> (`2.9 %` / `0.26 %` unlabeled, `0` ego self-hits), **pedestrian navigation**,
-> and **Epic's own traffic and crowd** mirrored into `world.get_actors()`.
+> 106 / 619 junctions, **193 / 2,107 kerbside stop signs**, **2 / 7 yield signs**,
+> **197 / 1,356 speed-limit signs** (`30–90 km/h`, `0` poles in driving lanes),
+> **1,096 / 8,310 crosswalks**, **camera semantic segmentation** (`0.2 %`
+> unlabeled on `Small_City_LVL`, `0.4 %` on `Big_City_LVL`, `Sky` labeled `11`),
+> and **semantic LiDAR** (`1.26 %` unlabeled on both maps, `0` ego self-hits) —
+> `carla.FastGeoTagger.Enable` now defaults to **`1`** (pass `0` if you do not
+> use semantic sensors).
 >
-> Three of those are **opt-in**, because each one changes what the server does:
+> Two features are **opt-in / installed**, because they add actors or map data:
 >
-> | flag | what it turns on | step |
+> | flag / asset | what it turns on | step |
 > |---|---|---|
-> | `-ExecCmds "carla.FastGeoTagger.Enable 1"` | camera & LiDAR semantic labels for the city geometry | §3.10 |
-> | `-ExecCmds "carla.MassBridge.Enable 1"` | Epic's traffic *and crowd* visible to `world.get_actors()` | §3.9 |
-> | a built navmesh in `Content\Map\Nav\` | walkers and `get_random_location_from_navigation()` | §3.11 |
+> | `-ExecCmds "carla.MassBridge.Enable 1"` | Epic's Mass traffic *and crowd* in `world.get_actors()`, centered on `hero` (coexists with Traffic Manager) | §3.9 |
+> | a built navmesh in `Content\Map\Nav\` | walkers and `get_random_location_from_navigation()` on Epic's measured ZoneGraph sidewalks | §3.11 |
 >
-> **Known gaps, measured on the running server (§11):**
+> **Remaining caveats, measured on the running server (§12):**
 >
-> - **Semantic LiDAR needs the tagger too.** It labels its hits through the
->   same FastGeo tagger the camera uses, so without
->   `carla.FastGeoTagger.Enable 1` it returns mostly tag 0; with it, `0.26–2.9 %`
->   of points stay unlabeled (§11).
-> - **Yield and speed-limit signs are absent.** City Sample does not author
->   them. Traffic lights and stop signs are emitted (§11).
-> - **Sidewalks are synthesised by default, not measured.** The default road
->   export omits pedestrian lanes, so pedestrian navigation runs on 2.5 m strips
->   laid along the carriageway edges (`--keep-sidewalks` exports Epic's own
->   ZoneGraph pedestrian lanes instead; §3.11).
-> - **The Mass bridge is read-only** and must not be run alongside CARLA's
->   Traffic Manager. It mirrors the entities **nearest the spectator**, capped
->   by `carla.MassBridge.MaxProxies` (150 vehicles) and
->   `carla.MassBridge.MaxWalkers` (100) — so it shows you the traffic you can
->   see, not a sample of the whole city, but it is a window, not a census.
+> - **Run `segmentation_census.py` twice after server start.** On the very first
+>   pass while World Partition is still streaming, untagged geometry carries City
+>   Sample's custom primitive data (`R > 29`) and the tool refuses to report a
+>   number; the second and later runs settle at `0.2–0.4 %` `Unlabeled` (§3.10).
+> - **Speed limits and yield signs are inferred from ZoneGraph tags & merge geometry.**
+>   City Sample authors no sign actors, so speed limits (`30–90 km/h`) come from
+>   ZoneGraph road-class tags (`Freeway`, `Ramp`, urban density tiers) and yield
+>   signs (`205`) from unsignalised ramp/slip/minor-to-major merges (§3.8).
+> - **The Mass bridge is a read-only window around `hero` (or the spectator).**
+>   Capped by `carla.MassBridge.MaxProxies` (150 vehicles) and
+>   `carla.MassBridge.MaxWalkers` (100), it automatically centers on
+>   `role_name="hero"` (`carla.MassBridge.FollowHero 1`). CARLA's Traffic Manager
+>   now runs safely alongside it and yields to Mass vehicles within 60 m, though
+>   Epic's Mass ECS vehicles do not yield back to CARLA-spawned cars (§3.9).
 >
-> Good for control, planning, navigation, signalised junctions, pedestrians,
-> camera segmentation, and semantic/plain LiDAR + radar work.
+> Ready for control, planning, navigation, signalised & unsignalised junctions,
+> freeway/urban speed limits, pedestrians, camera segmentation, and semantic/plain
+> LiDAR + radar work.
 
 ---
 
@@ -304,9 +310,10 @@ python tools/carla_traffic_lights.py --traffic 60 --watch 30
 ```
 
 Both converters have `--selftest` and need no editor and no rebuild.
-`add_signals_to_xodr.py` also gives a light to any approach of a signalised
-junction that none of Epic's lights reaches, and reports how many it added;
-see §9.
+`add_signals_to_xodr.py` emits:
+- **Traffic lights (`1000001`)**: `355` (`Small_City_LVL`) and `2,176` (`Big_City_LVL`), completing any signalised junction approach Epic's `.uasset` left unreached.
+- **Curbside stop (`206`) and yield (`205`) signs**: `193` / `2,107` stop signs at urban unsignalised multi-arm junctions, and `2` / `7` yield signs on unsignalised freeway/ramp merges, acute slip lanes, and minor-to-major T-stems (`1`‑arm diverges and mainline freeway through-lanes stay free-flowing).
+- **Curbside US MUTCD speed-limit signs (`274`, `country="US"`)**: `197` (`+ 144` parallel-lane `<signalReference>`s) on `Small_City_LVL` and `1,356` (`+ 583` refs) on `Big_City_LVL`, inferred from ZoneGraph road tags (`90 km/h` Trunk Freeway, `80 km/h` Freeway, `60 km/h` Ramp, `50 / 40 / 30 km/h` urban density tiers), updating `vehicle.get_speed_limit()` via CARLA's `USpeedLimitComponent` trigger boxes (`0` runtime `overlaps a driving lane` warnings).
 
 > **Three encodings look right and produce nothing.** Worth knowing before you
 > touch this code:
@@ -353,12 +360,17 @@ Measured: **150 proxies** (the default cap), ids in the dedicated dormant range
 >   `FVehicleActor::SetActorAutopilot` has an empty dormant branch and still
 >   returns `Success`, and `ApplyControlToVehicle` writes to `FActorData` that
 >   the bridge overwrites next frame. Treat proxies as observations.
-> - **Do not run the Traffic Manager with the bridge on.** ALSM calls
->   `world.GetActors()` every cycle and adopts any unregistered actor whose type
->   id starts with `v`, with no dormant check — it would take every proxy as an
->   unregistered vehicle and run a waypoint search per bounding-box corner.
-> - **Off by default**, capped at 150 (`carla.MassBridge.MaxProxies`). Turning
->   it off deregisters every proxy rather than freezing them in the registry.
+> - **Centers on `hero` (or the spectator) and coexists with Traffic Manager.**
+>   With `carla.MassBridge.FollowHero 1` (the default), the bridge automatically
+>   centers its `150` vehicle / `100` pedestrian window on any vehicle with
+>   `role_name="hero"`, falling back to the spectator when none exists. Our
+>   `ALSM.cpp` dormant-actor patch ([carla#10366](https://github.com/carla-simulator/carla/issues/10366))
+>   lets CARLA's Traffic Manager run alongside the bridge and yield to nearby
+>   Mass vehicles (within 60 m), though Epic's Mass vehicles do not yield back to
+>   CARLA-spawned cars.
+> - **Off by default**, capped at 150 vehicles (`carla.MassBridge.MaxProxies`)
+>   and 100 walkers (`carla.MassBridge.MaxWalkers`). Turning it off deregisters
+>   every proxy rather than freezing them in the registry.
 
 Two things this needed in CARLA itself, both in the patch: `FActorRegistry`
 gained `CARLA_API` (its out-of-line members were never exported, so any other
@@ -366,7 +378,7 @@ module calling them got LNK2019), and a new `RegisterDormant()` entry point —
 the registry's only door took an `AActor&`, though everything downstream of
 creation already tolerated a null one.
 
-### Step 10 — semantic labels for the city itself (optional)
+### Step 10 — semantic labels for the city itself (on by default)
 
 City Sample streams its world through Epic's **FastGeoStreaming** plugin as
 `FFastGeoPrimitiveComponent` — plain C++ objects implementing
@@ -378,10 +390,13 @@ take one as an argument. A census inside `ATagger` measured the damage: **seven*
 static mesh components in the entire city.
 
 `CarlaFastGeoTagger` walks the FastGeo containers directly, classifies each mesh
-with the same rule table, and writes the label into custom primitive data:
+with the same rule table, and writes the label into custom primitive data.
+Starting in `v1.1.0`, **`carla.FastGeoTagger.Enable` defaults to `1`** (pass
+`-ExecCmds "carla.FastGeoTagger.Enable 0"` to disable it if you do not use
+semantic sensors):
 
 ```bash
-powershell -File tools\Run-CarlaCity.ps1 -ExecCmds "carla.FastGeoTagger.Enable 1"
+powershell -File tools\Run-CarlaCity.ps1
 python tools/verify_sensors.py
 ```
 
@@ -420,16 +435,18 @@ distinct labels             7       12
 
 > **Five traps, all of which fail completely silently.**
 >
-> - **Do not cache "already tagged" against a pointer.** World Partition
+> - **Do not cache "already tagged" against a raw pointer.** World Partition
 >   unloads a container when the streaming source moves away and loads it again
 >   when it comes back, and the allocator reuses the *same addresses* for the
 >   replacements. Both a `TSet` of tagged component pointers and a `TMap` of
 >   containers-by-primitive-count therefore report brand-new, untagged geometry
 >   as done. One fixed viewpoint measured anywhere between 0 % and 92 %
->   `Unlabeled` depending on how streaming had cycled. The sweep keeps **no
->   state at all** and re-reads each component's own label float instead —
->   which cannot go stale, and costs a pointer chase and a compare per
->   component.
+>   `Unlabeled` depending on how streaming had cycled. In `v1.1.0`,
+>   `CarlaFastGeoTagger` caches completed `UFastGeoContainer` UObjects only by
+>   **`FObjectKey`** (`ObjectIndex + SerialNumber`, which a reused address can
+>   never match) once `ContainerNewlyTagged == 0 && ContainerDeferred == 0`,
+>   cutting steady-state sweep cost on `Big_City_LVL`'s 1.11 M primitives while
+>   never skipping newly streamed containers.
 > - **`MarkRenderStateDirty(true)` crashes the server.** Forcing the flag on a
 >   component whose `ProxyState` is `Creating` queues it for recreation, and the
 >   recreate path re-enters `CreateRenderState`, which asserts
@@ -487,10 +504,11 @@ Walker AI needs a Recast navmesh. CARLA builds one for
 the box the City Sample has none — and the failure is completely silent:
 `get_random_location_from_navigation()` returns `None` and walkers stand still.
 
-Build one from the same `.xodr` the traffic uses:
+Build one directly from Epic's measured ZoneGraph pedestrian lanes (`--zonegraph`)
+plus the `.xodr` driving lanes and crosswalks:
 
 ```bash
-python tools/xodr_to_recast_obj.py SmallCity-signals.xodr -o SmallCity.obj
+python tools/xodr_to_recast_obj.py SmallCity-signals.xodr --zonegraph zonegraph.json -o SmallCity.obj
 ```
 
 ```bash
@@ -563,26 +581,21 @@ PASS - walkers navigate the map
 >   script that `sleep`s instead sees every walker spawn and then stand
 >   perfectly still — indistinguishable from a broken navmesh.
 
-The sidewalks are **synthesised**, not measured: a 2.5 m strip is laid along
-each carriageway edge, marching outward past neighbouring lanes until it finds
-clear ground (ZoneGraph exports every lane as its own road, so a fixed offset
-would put sidewalks in the middle of the street). They approximate where City
-Sample's real sidewalk meshes are. `--sidewalk-width` and `--no-sidewalks`
-control this.
+With `--zonegraph zonegraph.json`, `xodr_to_recast_obj.py` meshes **Epic's own
+authored `Pedestrian` ZoneGraph lanes** (`7,846` lanes -> `12,532` quads on
+`Small_City_LVL`, `620` tiles, `5.67 MB`; `59,384` lanes -> `95,215` quads on
+`Big_City_LVL`, `5,591` tiles, `45.79 MB`, enforcing a `1.6 m` minimum ribbon
+width so Recast's `2 × 0.3 m` border erosion never pinches narrow `1.0 m`
+connectors closed) without bloating the `.xodr` road network. Because Epic's
+ZoneGraph includes pedestrian corner connectors at every intersection, both
+`Small_City_LVL` and `Big_City_LVL` build into **`walkable : 1 island(s), 100%`**
+with **`30/30` walkers spawning and walking** on both maps.
 
-At junctions the strips wrap the corners: they run on past the end of the
-street, and a kerbside strip follows the outside of each right turn. Before
-that, every strip stopped at the junction, so each side of each block was an
-island its walkers could never leave; the walker check above cannot see this,
-because a walker on an island still walks. On a synthetic 13 × 13 grid the
-walkable surface went from 312 islands (the largest 0.3 % of it) to one
-network. The tool now prints `walkable : N island(s)` and complains when no
-island holds half the area. Check that line for the City Sample.
-
-With `zonegraph_to_roadnetwork.py --keep-sidewalks`, Epic's own pedestrian
-lanes are written to the `.xodr` as `sidewalk` lanes, and this tool meshes
-*them* as the sidewalks instead of synthesising any. That path is not yet
-measured on the City Sample.
+If `--zonegraph` is omitted, the tool falls back to **synthesised** sidewalks: a
+2.5 m strip laid along each carriageway edge, marching outward past neighbouring
+lanes until it finds clear ground and wrapping round junction corners
+(`--sidewalk-width` and `--no-sidewalks` control this). Always check the
+`walkable : N island(s)` line when building a new navmesh.
 
 ---
 
@@ -739,9 +752,11 @@ AGENTS.md                conventions and traps, for anyone (or anything)
                          editing this repo
 CITATION.cff             citation metadata; GitHub renders a Cite button
 .zenodo.json             what Zenodo records when it archives a release
-ISSUES-TO-FILE.md        nine reproducible CARLA bugs found on the way
+ISSUES-TO-FILE.md        twelve reproducible CARLA bugs found on the way (eleven filed upstream)
 docs/
   IMPLEMENTATION-PLAN.md         the design and its evidence, stage by stage
+  citysample-carla.{mp4,gif}     3-minute 4-sensor Big_City_LVL showcase (<10 MB each)
+  citysample-carla-nurec.{mp4,gif}  CARLA 1.0 + NVIDIA NuRec 3DGUT photorealism showcase
 ```
 
 Everything derived from City Sample content — `zonegraph*.json`,
@@ -856,25 +871,28 @@ of a correct junction can legitimately show every light red.
 > `uncontrolled approaches at signalised junctions`, which should be 0.
 > `--no-complete-junctions` restores the old output.
 
-**The full city**, CARLA 1.0 (`3ea166118d2c` / engine `b76fce0e3bcb`) serving `Small_City_LVL`:
+**The full city (`v1.1.0`)**, CARLA 1.0 (`3ea166118d2c` / engine `b76fce0e3bcb`) serving `Small_City_LVL` (`FastGeoTagger` on by default):
 
 ```
 map               : Map/Small_City_LVL
 topology / spawns : 4,672 segments, 2,263 junction entries, 4,672 spawn points
 route reach       : 200/200 random walks reached 500 m
-traffic manager   : 58/60 spawned, 58/58 alive, 54 moving (median 30 km/h, max 46)
-signals           : 355 traffic lights (106 groups, cycling), 209 kerbside stop signs
-                    (+ 20 lane refs, 0 poles overlapping driving lanes, was 239),
-                    354/408 red-light samples stationary (87%)
-mass bridge       : 250 dormant proxies (150 vehicles, 100 walkers), both moving,
-                    250/250 replaced after a 1,447 m spectator move
-sensors           : unparented semantic LiDAR 232,596 pts (2.9% Unlabeled),
-                    attached LiDAR 258,385 pts (0 ego self-hits),
-                    plain LiDAR 127,430 pts, radar 1,980 detections,
+traffic manager   : 55/60 spawned, 55/55 alive, 53 moving alongside 250 Mass proxies
+                    (+ 25/25 in dedicated FollowHero + TM coexistence check)
+signals & signs   : 355 traffic lights (106 groups, 5 phase patterns cycling),
+                    193 kerbside stop signs, 2 yield signs, 197 US MUTCD speed-limit
+                    signs (+ 144 lane refs; 30/40/50/90 km/h; live get_speed_limit()
+                    30 -> 50 km/h trigger verified; 0 poles overlapping driving lanes)
+mass bridge       : 250 dormant proxies (150 vehicles, 100 walkers), FollowHero active
+                    (median 250.2 m to hero vs 1,295.1 m to spectator across 1,447 m sep)
+sensors           : unparented semantic LiDAR 207,005 pts (1.26% Unlabeled),
+                    attached LiDAR 250,048 pts (0 ego self-hits),
+                    plain LiDAR 122,839 pts, radar 1,980 detections,
                     ground_projection + cast_ray (2 roadway hits) PASS
-segmentation      : 0.5% then 0.1% Unlabeled across settled 800x600 runs
-                    (0.00% pixels > 29; 214 FastGeo containers, 106,949 seen, 0 unmatched)
-walkers           : 605-tile navmesh, 20/20 random points, 30/30 walkers moved (median 20.9 m)
+segmentation      : 0.2% Unlabeled on settled 800x600 run (Sky labeled 11; 0.00% > 29;
+                    214 FastGeo containers, 67 cached via FObjectKey, 0 unmatched)
+walkers           : 620-tile navmesh from 7,846 measured ZoneGraph pedestrian lanes
+                    (1 island, 100%), 20/20 random points, 30/30 walkers moved (median 21.1 m)
 ```
 
 And serving **`Big_City_LVL`** (`4.16 × 4.99 km`):
@@ -885,21 +903,23 @@ road export       : 23,594 roads (7,372 ordinary + 16,222 connecting), 1,236 jun
                     1,197.50 km, 8,310 crosswalks, 0 dead ends into a junction
 topology / spawns : 33,590 segments, 16,218 junction entries, 33,590 spawn points
 route reach       : 200/200 random walks reached 500 m
-traffic manager   : 60/60 spawned, 60/60 alive, 57 moving (median 30 km/h, max 46)
-signals           : 2,176 traffic lights (619 groups, 5 phase patterns cycling),
-                    2,133 kerbside stop signs (+ 8 lane refs, 0 poles overlapping
-                    driving lanes, was 1,322), 6,222 landmarks, 27/53 red-light stationary (51%)
-mass bridge       : 250 dormant proxies (150 vehicles, 100 walkers), both moving,
-                    250/250 replaced after a 4,529 m spectator move
-sensors           : unparented semantic LiDAR 273,492 pts (0.26% Unlabeled),
-                    attached LiDAR 283,548 pts (0 ego self-hits),
-                    plain LiDAR 150,043 pts, radar 2,947 detections,
-                    ground_projection + cast_ray (4 roadway hits) PASS
-segmentation      : 6.9% Unlabeled at (0, 0) where open sky atmosphere has no mesh,
-                    2.7% at (703, 296) (0.00% pixels > 29; 4,519 FastGeo containers,
-                    1,113,458 seen, 1,110,973 matched)
-walkers           : 5,495-tile navmesh (56.1 MB), 20/20 random points across 3.6 x 3.6 km,
-                    30/30 spawned, 27/30 moved > 1 m (median 20.6 m)
+traffic manager   : 59/60 spawned, 59/59 alive, 55 moving up to 79 km/h on 90 km/h
+                    freeways alongside 250 Mass proxies (+ 25/25 in gap check)
+signals & signs   : 2,176 traffic lights (619 groups, 5 phase patterns cycling),
+                    2,107 kerbside stop signs, 7 yield signs, 1,356 US MUTCD speed-limit
+                    signs (+ 583 lane refs; 30/40/50/90 km/h; live 30 -> 50 km/h verified;
+                    8,134 landmarks; 0 runtime overlaps-a-driving-lane warnings)
+mass bridge       : 250 dormant proxies (150 vehicles, 100 walkers), FollowHero + TM
+                    coexistence verified
+sensors           : unparented semantic LiDAR 204,168 pts (1.26% Unlabeled),
+                    attached LiDAR 237,792 pts (0 ego self-hits),
+                    plain LiDAR 111,564 pts, radar 2,941 detections,
+                    ground_projection + cast_ray PASS
+segmentation      : 0.4% Unlabeled at (0, 0) (was 6.9% before SM_dome Sky fix; 6.9% Sky,
+                    0.00% pixels > 29; 3,330 FastGeo containers, 297 cached via FObjectKey)
+walkers           : 5,591-tile navmesh (45.8 MB) from 59,384 measured ZoneGraph pedestrian
+                    lanes (1 island, 100%), 20/20 random points across 3.8 x 3.8 km,
+                    30/30 spawned in 30 attempts, 30/30 moved > 1 m (median 20.9 m)
 ```
 
 Earlier baseline on legacy CARLA 0.10.0 (`de3f38e64`, pre-junction-id export):
@@ -1041,81 +1061,91 @@ Three settings to change:
    work. Keep it if you want walkers you control; drop it to 0 if Epic's crowd
    through the bridge is enough.
 
-**On frame rate.** The server runs about 17 Hz with the tagger and the bridge
-on at Epic quality. Four 1080×1920 cameras on top of that will cost more —
-budget accordingly, or drop `-Quality` to `Medium`.
+**On frame rate and streaming performance.** The server runs about 17 Hz at
+Epic quality. Three `v1.1.0` knobs cut CPU and GPU load further:
+- `CarlaFastGeoTagger` and `ATagger::TagNewActorsInWorld` memoize completed
+  `UFastGeoContainer`s and actors via `FObjectKey` (`ObjectIndex + SerialNumber`),
+  making steady-state semantic sweeps near-free even on `Big_City_LVL`.
+- `-ExecCmds "carla.Streaming.HeroRadiusCm 60000"` (or setting
+  `world_settings.tile_stream_distance = 600.0` live from Python) shrinks the
+  hero vehicle's World Partition streaming radius on `Big_City_LVL`.
+- `-Quality Medium` (or `Low`) drops UE5 scalability when running many
+  high-resolution cameras.
 
 ---
 
-## 11. Known limitations
+## 11. NVIDIA NuRec Photorealism (CARLA 1.0)
+
+CARLA 1.0 ships native integration (`PythonAPI/examples/nvidia/nurec`) with
+**NVIDIA Omniverse NuRec** (`nvcr.io/nvidia/nre/nre-ga:26.04.01`), pairing
+CARLA's OpenDRIVE world, Chaos vehicle physics, and Traffic Manager with
+3D Gaussian Ray Tracing (`3dgut-nrend`) for photorealistic multi-camera and
+neural LiDAR rendering over gRPC.
+
+![CARLA 1.0 + NVIDIA NuRec 3DGUT photorealistic multi-camera and neural LiDAR replay](docs/citysample-carla-nurec.gif)
+
+*CARLA 1.0 driving a reconstructed urban corridor through NVIDIA NuRec
+(`NRE 26.04.01`, `3dgut-nrend`): synchronized `120°` f-theta neural cameras
+(front wide, cross-left, cross-right), a `PANDAR128` neural LiDAR bird's-eye
+view (`~459k` points/sweep), and CARLA 1.0's UE 5.8 closed-loop physics view
+running side by side — first following the nominal corridor under CARLA Chaos
+vehicle physics, then driving a `+1.8 m` counterfactual lane shift while handing
+dynamic 3DGS background vehicles over to collision-aware CARLA Traffic Manager
+control. Full clip: [docs/citysample-carla-nurec.mp4](docs/citysample-carla-nurec.mp4)
+(scene reconstructed from CC-BY-4.0 PhysicalAI NuRec Hyperion 8.1 data; contains
+zero Epic content).*
+
+Verified against the patched CARLA 1.0 server and wheel built in §3:
+1. Run `nvcr.io/nvidia/nre/nre-ga:26.04.01 serve-grpc --port=46435 --enable-editing-actors --artifact-glob <scene>.usdz` (Linux or WSL2 with NVIDIA Container Toolkit).
+2. Connect CARLA's `nurec_runner.py --port 2000 --nurec-port 46435 -u <scene>.usdz` — `client.generate_opendrive_world()` builds the collision road in CARLA while NRE renders batched RGB and LiDAR sweeps at CARLA's simulated poses each tick.
+
+---
+
+## 12. Known limitations
 
 Everything here was measured on the running server, not inferred.
 
-### What you should not trust yet
+### Remaining caveats
 
-- **Semantic LiDAR leaves 3.3 % unlabeled** — thin geometry and whatever the
-  tagger has not swept yet. It needs `carla.FastGeoTagger.Enable 1`, the same
-  flag the camera needs; without it, ray-cast labels fall back to Unlabeled.
-- **Sidewalks are synthesised.** The exported network has no sidewalk lanes, so
-  pedestrian navigation runs on 2.5 m strips laid along the carriageway edges,
-  pushed outward until they clear the road and wrapped round junction corners.
-  They approximate the real sidewalk meshes; they are not a measurement of
-  them. Some walkers will therefore walk where a City Sample pedestrian would
-  not. `--keep-sidewalks` meshes Epic's own pedestrian lanes instead (part B
-  step 11), not yet measured here.
+- **The first segmentation measurement after a server start is meaningless.**
+  Untagged FastGeo geometry renders with whatever City Sample left in float 5
+  of its custom primitive data, and the shader reads that as a label — so it
+  appears as nonsense labels above 29, not as `Unlabeled`.
+  `segmentation_census.py` detects this and refuses to report a number; the
+  second and later runs settle at `0.2 %` (`Small_City_LVL`) and `0.4 %`
+  (`Big_City_LVL`).
+- **Speed-limit and yield signs are inferred, not authored by Epic.** City
+  Sample drives Mass traffic off ZoneGraph tags without sign actors. Our
+  converters assign road-class `<speed>` limits and curbside US MUTCD
+  `traffic.speed_limit.*` signs (`90` Trunk Freeway, `80` Freeway, `60` Ramp,
+  `50 / 40 / 30 km/h` urban density tiers) plus curbside `traffic.yield` signs
+  (`205`) at unsignalised freeway/ramp/slip/minor merges.
 - **`get_crosswalks()` reports each crossing half a lane along its own axis.**
   CARLA measures an object from lane 0 *after* `laneOffset`
   (`Road::GetDirectedPointIn`), not from the reference line as OpenDRIVE
   defines it, so on this network every zone it returns is 1.75 m from the
   painted crossing, along it. The pedestrian navmesh follows the standard and
-  places them exactly. Checked against CARLA's map parser, not on this server.
-- **Yield and speed-limit signs are absent**, because City Sample does not
-  author them: its traffic is Mass-driven off the ZoneGraph, and the only
-  intersection semantics Epic records are "has a traffic light" or not. Stop
-  signs ARE emitted, from exactly that distinction. There are no speed limits
-  to export either, so CARLA applies its default 30 km/h.
+  places them exactly.
+- **Two traffic systems share the street when Mass and Traffic Manager both run.**
+  With `ALSM.cpp` patched ([carla#10366](https://github.com/carla-simulator/carla/issues/10366)),
+  CARLA's Traffic Manager safely runs alongside `CarlaMassBridge` and yields to
+  Mass vehicles within 60 m (`55/55` and `59/59` TM cars surviving). However,
+  Epic's Mass ECS vehicles are read-only in CARLA and do not yield back to
+  CARLA-spawned cars; disable `Auto Spawn On Begin Play` on the Mass vehicle
+  spawners if you want purely CARLA-controlled traffic.
 - **Older `.xodr` exports break `set_autopilot(True)` at junctions (fixed in
-  current exports, verified on CARLA 1.0 with 58/58 vehicles surviving).** On
-  exports made before the junction-id fix, the traffic manager
-  removed vehicles, and the network was why: CARLA's parser ignores `elementType`
-  and treats a link to junction *k* as a link to road *k* whenever road *k*
-  exists, and the converter numbered junctions 0..171 beside roads 0..3336. So
-  every road entering a junction was a dead end, and the TM destroys any
-  vehicle whose path reaches one — silently, because `osm_mode` defaults to on.
-  `roadnetwork_to_xodr.py` now numbers junctions clear of every road id, which
-  is checked against CARLA's own map parser. Regenerate and redeploy the
-  `.xodr` (part A step 3, then part B step 8). On an older export, drive an ego
-  with waypoints — `tools/record_carla.py`'s `RouteDriver` — and expect it to
-  stop at its first junction too. Written up upstream as issue 9 before the
-  cause was known.
-- **Two traffic systems run at once.** CARLA's game mode does not replace
-  Epic's Mass Traffic and Mass Crowd — the CARLA plugin contains no reference
-  to Mass at all, and five `BP_Mass*Spawner` actors in `Small_City_LVL` sit
-  outside any Data Layer, so they always load. Either enable the Mass bridge so
-  the API can see Epic's traffic, or uncheck `Auto Spawn On Begin Play` on
-  those five spawners and use CARLA's Traffic Manager instead. Do not do both:
-  the bridge is read-only and the two controllers fight.
-  (`BP_MassTrafficIntersectionSpawner` also creates the *visual* traffic
-  lights, so disabling it costs you those.)
-- **The first segmentation measurement after a server start is meaningless.**
-  Untagged FastGeo geometry renders with whatever City Sample left in float 5
-  of its custom primitive data, and the shader reads that as a label — so it
-  appears as nonsense labels above 29, not as `Unlabeled`.
-  `segmentation_census.py` detects this and refuses to report a number.
-- **Open sky atmosphere renders as `Unlabeled` (`0`) rather than `Sky` (`11`).**
-  City Sample renders its sky via `USkyAtmosphereComponent` rather than a static
-  sky dome mesh, so camera pixels at the far plane carry label `0` (~0.1–0.5 %
-  on `Small_City_LVL` at `(0, 0)`, ~6.9 % looking down the wider canyon at
-  `(0, 0)` on `Big_City_LVL`).
+  current exports).** Exports made before the junction-id fix numbered junctions
+  `0..171` beside roads `0..3336`, triggering [carla#9869](https://github.com/carla-simulator/carla/issues/9869);
+  regenerate with current `roadnetwork_to_xodr.py`.
 
 ### Ordinary limitations
 
 - Parallel lanes are separate roads, so CARLA sees no lane-change relationship
   between them. Deliberate: correct geometry first.
-- No `<speed>` elements, so CARLA applies its default 30 km/h limit.
-- Pedestrian lanes are dropped from the road network by default
-  (`--keep-sidewalks` keeps them).
-- `cast_ray()` reports a phantom flat surface at z=0 beyond the ~200 m
+- Pedestrian lanes are meshed directly into the Recast `.bin` via
+  `xodr_to_recast_obj.py --zonegraph` rather than inflating the `.xodr`
+  (`zonegraph_to_roadnetwork.py --keep-sidewalks` keeps them in `.xodr` too if needed).
+- `cast_ray()` reports a phantom flat surface at z=0 beyond the World Partition
   streaming radius — there is genuinely no geometry loaded out there.
 - `-Undo` does **not** reverse two things: the git patch applied to your CARLA
   source tree, and the HKCU engine registration. Reverse those by hand if you
@@ -1124,21 +1154,24 @@ Everything here was measured on the running server, not inferred.
 ### Fixed along the way
 
 Each of these was a hard failure at some point, and each is verified fixed by a
-tool in `tools/`. The details are in the step that fixed them, and the ones
+tool in `tools/`. The details are in the step that fixed them, and the twelve
 that are CARLA's rather than ours are written up in
-[ISSUES-TO-FILE.md](ISSUES-TO-FILE.md).
+[ISSUES-TO-FILE.md](ISSUES-TO-FILE.md) (eleven filed upstream, including
+[#10364](https://github.com/carla-simulator/carla/issues/10364),
+[#10365](https://github.com/carla-simulator/carla/issues/10365), and
+[#10366](https://github.com/carla-simulator/carla/issues/10366) on CARLA 1.0).
 
 | was | now | verify with |
 |---|---|---|
-| every ray-cast sensor returned nothing | lidar 232,584 points, radar 1,980 detections | `verify_sensors.py` |
-| segmentation labels 79/80/81, outside the valid 0–29 range | 0.00 % out of range | `verify_sensors.py` |
-| 98.8 % of the semantic frame `Unlabeled` | 0.5 % | `segmentation_census.py` |
-| no traffic lights at all | 353 lights, 106 junctions, phased | `carla_traffic_lights.py` |
-| no crosswalks | 1,096, as 5,480 polygon points | `carla_traffic_lights.py` |
-| `world.get_actors()` blind to Epic's traffic and crowd | 250 dormant proxies (150 vehicles, 100 pedestrians), nearest first | `carla_mass_bridge.py` |
-| semantic LiDAR 99.1 % `Unlabeled` | 3.3 %, eight labels | `verify_sensors.py` |
-| no stop signs | 229 landmarks, 217 `traffic.stop` actors | `carla_traffic_lights.py` |
-| `get_random_location_from_navigation()` always `None` | 608 navmesh tiles, walkers walk | `carla_walkers.py` |
+| every ray-cast sensor returned nothing | lidar 207k–238k points, radar 1,980–2,941 detections | `verify_sensors.py` |
+| segmentation labels 79/80/81, outside the valid 0–29 range | 0.00 % out of range (tagger enabled by default) | `verify_sensors.py` |
+| 98.8 % of the semantic frame `Unlabeled` (`6.9 %` sky on `Big_City_LVL`) | `0.2 %` (`Small_City_LVL`) and `0.4 %` (`Big_City_LVL`), `Sky` = `11` | `segmentation_census.py` |
+| no traffic lights at all | `355` / `2,176` lights across `106` / `619` junctions, phased | `carla_traffic_lights.py` |
+| no stop, yield, or speed-limit signs | `193` / `2,107` stop, `2` / `7` yield, `197` / `1,356` speed-limit signs (`30–90 km/h`, `0` poles in lanes) | `carla_traffic_lights.py` |
+| no crosswalks | `1,096` / `8,310` crossings | `carla_traffic_lights.py` |
+| `world.get_actors()` blind to Epic's traffic and crowd, & incompatible with TM | 250 dormant proxies centered on `hero` (`FollowHero`), coexisting with TM (`55/55` & `59/59` alive) | `carla_mass_bridge.py` |
+| semantic LiDAR 99.1 % `Unlabeled` | `1.26 %` `Unlabeled` on both maps, `0` ego self-hits | `verify_sensors.py` |
+| `get_random_location_from_navigation()` `None` / synthesised sidewalk strips | `620` / `5,591` navmesh tiles from `7,846` / `59,384` measured ZoneGraph pedestrian lanes (`1` island, `30/30` walking) | `carla_walkers.py` |
 | `ground_projection()` / `project_point()` returned `None` | real locations | `verify_sensors.py` |
 | the server asserted and died mid-run under streaming | no assertions | any of the above |
-| `Big_City_LVL` unexported (`17` untagged sidewalk shapes leaked into roads) | `23,594` roads, `1,236` junctions, `2,176` lights, `5,495` navmesh tiles, `60/60` TM alive | `Run-CarlaCity.ps1 -Map Big_City_LVL` |
+| `Big_City_LVL` unexported (`17` untagged sidewalk shapes leaked into roads) | `23,594` roads, `1,236` junctions, `2,176` lights, `5,591` navmesh tiles, `59/59` TM alive up to `79 km/h` | `Run-CarlaCity.ps1 -Map Big_City_LVL` |

@@ -18,10 +18,40 @@
 
 #include "Engine/World.h"
 #include "GameFramework/Pawn.h"
+#include "HAL/IConsoleManager.h"
 
 namespace
 {
   namespace crp = carla::rpc;
+
+  static TAutoConsoleVariable<int32> CVarCarlaMassBridgeFollowHero(
+      TEXT("carla.MassBridge.FollowHero"),
+      1,
+      TEXT("Center the Mass traffic/crowd proxy window on an active role_name=hero "
+           "vehicle when present, falling back to the spectator pawn.\n"
+           "  0: always follow spectator\n"
+           "  1: follow hero vehicle if spawned, else spectator (default)"),
+      ECVF_Default);
+
+  bool IsHeroActor(const FCarlaActor *CarlaActor)
+  {
+    if (CarlaActor == nullptr || CarlaActor->IsDormant() ||
+        CarlaActor->GetActorType() != FCarlaActor::ActorType::Vehicle ||
+        CarlaActor->GetActor() == nullptr)
+    {
+      return false;
+    }
+    const FActorInfo *Info = CarlaActor->GetActorInfo();
+    if (Info == nullptr)
+    {
+      return false;
+    }
+    if (const FActorAttribute *Role = Info->Description.Variations.Find(TEXT("role_name")))
+    {
+      return Role->Value.Contains(TEXT("hero")) || Role->Value.Contains(TEXT("ego_vehicle"));
+    }
+    return false;
+  }
 
   // A generic saloon-ish box, in UNREAL CENTIMETRES. FBoundingBox is stored in
   // UE units and converted to metres for the client, so metres here would ship
@@ -57,6 +87,32 @@ FVector UCarlaMassBridgeSubsystem::GetObserverLocation() const
 {
     if (const UCarlaEpisode *Episode = GetEpisode())
     {
+        if (CVarCarlaMassBridgeFollowHero.GetValueOnGameThread() != 0)
+        {
+            if (CachedHeroId != 0)
+            {
+                const FCarlaActor *Hero = Episode->GetActorRegistry().FindCarlaActor(CachedHeroId);
+                if (IsHeroActor(Hero))
+                {
+                    return Hero->GetActor()->GetActorLocation();
+                }
+                CachedHeroId = 0;
+            }
+            const double Now = GetWorld() ? GetWorld()->GetTimeSeconds() : 0.0;
+            if (Now - LastHeroScanTime >= 0.5)
+            {
+                LastHeroScanTime = Now;
+                for (const auto &Pair : Episode->GetActorRegistry())
+                {
+                    const FCarlaActor *Candidate = Pair.Value.Get();
+                    if (IsHeroActor(Candidate))
+                    {
+                        CachedHeroId = Candidate->GetActorId();
+                        return Candidate->GetActor()->GetActorLocation();
+                    }
+                }
+            }
+        }
         if (const APawn *Spectator = Episode->GetSpectatorPawn())
         {
             return Spectator->GetActorLocation();
@@ -74,11 +130,10 @@ void UCarlaMassBridgeSubsystem::BeginFrame()
     if (!bWarnedAboutTrafficManager)
     {
         bWarnedAboutTrafficManager = true;
-        UE_LOG(LogCarlaCitySample, Warning,
-               TEXT("CarlaMassBridge: ENABLED. Mass entities will appear in "
-                    "world.get_actors() as dormant, READ-ONLY proxies. Do NOT run "
-                    "CARLA's Traffic Manager while this is on: ALSM adopts every "
-                    "actor whose type id starts with 'v' and has no dormant check."));
+        UE_LOG(LogCarlaCitySample, Log,
+               TEXT("CarlaMassBridge: ENABLED. Mass entities appear in "
+                    "world.get_actors() as dormant, READ-ONLY proxies centered "
+                    "on the hero vehicle (or spectator)."));
     }
 }
 

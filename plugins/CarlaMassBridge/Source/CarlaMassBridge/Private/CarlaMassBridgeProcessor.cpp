@@ -31,11 +31,10 @@ namespace
   static TAutoConsoleVariable<int32> CVarCarlaMassBridge(
       TEXT("carla.MassBridge.Enable"),
       0,
-      TEXT("Mirror MassTraffic entities into CARLA's actor registry as dormant "
-           "proxies so world.get_actors() sees them.\n"
+      TEXT("Mirror MassTraffic and MassCrowd entities into CARLA's actor registry as "
+           "dormant read-only proxies so world.get_actors() sees them.\n"
            "  0: off (default)\n"
-           "  1: on - DO NOT run CARLA's Traffic Manager at the same time; ALSM "
-           "adopts every proxy as an unregistered vehicle."),
+           "  1: on"),
       ECVF_Default);
 
   // A hard ceiling. Every proxy costs a registry entry and a slot in every

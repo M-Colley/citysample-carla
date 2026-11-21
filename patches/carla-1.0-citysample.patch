@@ -1,3 +1,191 @@
+diff --git a/LibCarla/source/carla/trafficmanager/ALSM.cpp b/LibCarla/source/carla/trafficmanager/ALSM.cpp
+index 25579b7..d4de499 100644
+--- a/LibCarla/source/carla/trafficmanager/ALSM.cpp
++++ b/LibCarla/source/carla/trafficmanager/ALSM.cpp
+@@ -302,75 +302,127 @@ void ALSM::UpdateData(const bool hybrid_physics_mode, const Actor &vehicle,
+ 
+ 
+ void ALSM::UpdateUnregisteredActorsData() {
+-  for (auto &actor_info: unregistered_actors) {
++  std::vector<ActorId> registered_ids = registered_vehicles.GetIDList();
++  std::vector<cg::Location> registered_locations;
++  registered_locations.reserve(registered_ids.size());
++  for (const ActorId reg_id : registered_ids) {
++    if (simulation_state.ContainsActor(reg_id)) {
++      registered_locations.push_back(simulation_state.GetLocation(reg_id));
++    }
++  }
++
++  constexpr float kDormantProxyRangeSq = 60.0f * 60.0f;
++  constexpr float kMaxVehicleWaypointDistSq = 3.5f * 3.5f;
++  constexpr float kMaxWalkerWaypointDistSq = 2.2f * 2.2f;
+ 
++  std::vector<ActorId> vanished_unregistered;
++  for (auto &actor_info: unregistered_actors) {
+     const ActorId actor_id = actor_info.first;
+     const ActorPtr actor_ptr = actor_info.second;
+-    const std::string type_id = actor_ptr->GetTypeId();
+-
+-    const cg::Transform actor_transform = actor_ptr->GetTransform();
+-    const cg::Location actor_location = actor_transform.location;
+-    const cg::Rotation actor_rotation = actor_transform.rotation;
+-    const cg::Vector3D actor_velocity = actor_ptr->GetVelocity();
+-    KinematicState kinematic_state {actor_location, actor_rotation, actor_velocity, -1.0f, true, cg::Location()};
+-
+-    TrafficLightState tl_state;
+-    ActorType actor_type = ActorType::Any;
+-    cg::Vector3D dimensions;
+-    std::vector<SimpleWaypointPtr> nearest_waypoints;
+-
+-    bool state_entry_not_present = !simulation_state.ContainsActor(actor_id);
+-    if (type_id.front() == 'v') {
+-      auto vehicle_ptr = std::static_pointer_cast<cc::Vehicle>(actor_ptr);
+-      kinematic_state.speed_limit = vehicle_ptr->GetSpeedLimit();
+-
+-      tl_state = {vehicle_ptr->GetTrafficLightState(), vehicle_ptr->IsAtTrafficLight()};
+-
+-      if (state_entry_not_present) {
+-        dimensions = vehicle_ptr->GetBoundingBox().extent;
+-        actor_type = ActorType::Vehicle;
+-        StaticAttributes attributes {actor_type, dimensions.x, dimensions.y, dimensions.z};
+-
+-        simulation_state.AddActor(actor_id, kinematic_state, attributes, tl_state);
+-      } else {
+-        simulation_state.UpdateKinematicState(actor_id, kinematic_state);
+-        simulation_state.UpdateTrafficLightState(actor_id, tl_state);
+-      }
++    if (actor_ptr == nullptr) {
++      vanished_unregistered.push_back(actor_id);
++      continue;
++    }
+ 
+-      // Identify occupied waypoints.
+-      cg::Vector3D extent = vehicle_ptr->GetBoundingBox().extent;
+-      cg::Vector3D heading_vector = vehicle_ptr->GetTransform().GetForwardVector();
+-      std::vector<cg::Location> corners = {actor_location + cg::Location(extent.x * heading_vector),
+-                                           actor_location,
+-                                           actor_location + cg::Location(-extent.x * heading_vector)};
+-      for (cg::Location &vertex: corners) {
+-        SimpleWaypointPtr nearest_waypoint = local_map->GetWaypoint(vertex);
+-        if (nearest_waypoint != nullptr) {
+-          nearest_waypoints.push_back(nearest_waypoint);
++    try {
++      const std::string type_id = actor_ptr->GetTypeId();
++      const bool is_dormant = actor_ptr->IsDormant();
++      if (is_dormant) {
++        // Streamed-out CARLA actors (PutActorToSleep) are frozen in unloaded
++        // cells and must not leave ghost roadblocks in track_traffic. Dormant
++        // Mass ECS proxies (.mass.) represent live external traffic/crowd, so
++        // only project them when within collision range of a registered TM car.
++        const bool is_mass_proxy = type_id.find(".mass.") != std::string::npos;
++        bool near_registered = false;
++        if (is_mass_proxy && !registered_locations.empty()) {
++          const cg::Location proxy_loc = actor_ptr->GetTransform().location;
++          for (const cg::Location &reg_loc : registered_locations) {
++            if (cg::Math::DistanceSquared(proxy_loc, reg_loc) <= kDormantProxyRangeSq) {
++              near_registered = true;
++              break;
++            }
++          }
++        }
++        if (!near_registered) {
++          track_traffic.UpdateUnregisteredGridPosition(actor_id, {});
++          continue;
+         }
+       }
+-    }
+-    else if (type_id.front() == 'w') {
+-      auto walker_ptr = std::static_pointer_cast<cc::Walker>(actor_ptr);
+ 
+-      if (state_entry_not_present) {
+-        dimensions = walker_ptr->GetBoundingBox().extent;
+-        actor_type = ActorType::Pedestrian;
+-        StaticAttributes attributes {actor_type, dimensions.x, dimensions.y, dimensions.z};
++      const cg::Transform actor_transform = actor_ptr->GetTransform();
++      const cg::Location actor_location = actor_transform.location;
++      const cg::Rotation actor_rotation = actor_transform.rotation;
++      const cg::Vector3D actor_velocity = actor_ptr->GetVelocity();
++      KinematicState kinematic_state {actor_location, actor_rotation, actor_velocity, -1.0f, true, cg::Location()};
++
++      TrafficLightState tl_state;
++      ActorType actor_type = ActorType::Any;
++      cg::Vector3D dimensions;
++      std::vector<SimpleWaypointPtr> nearest_waypoints;
++
++      bool state_entry_not_present = !simulation_state.ContainsActor(actor_id);
++      if (!type_id.empty() && type_id.front() == 'v') {
++        auto vehicle_ptr = std::static_pointer_cast<cc::Vehicle>(actor_ptr);
++        kinematic_state.speed_limit = vehicle_ptr->GetSpeedLimit();
++
++        tl_state = {vehicle_ptr->GetTrafficLightState(), vehicle_ptr->IsAtTrafficLight()};
++
++        if (state_entry_not_present) {
++          dimensions = vehicle_ptr->GetBoundingBox().extent;
++          actor_type = ActorType::Vehicle;
++          StaticAttributes attributes {actor_type, dimensions.x, dimensions.y, dimensions.z};
++
++          simulation_state.AddActor(actor_id, kinematic_state, attributes, tl_state);
++        } else {
++          simulation_state.UpdateKinematicState(actor_id, kinematic_state);
++          simulation_state.UpdateTrafficLightState(actor_id, tl_state);
++        }
+ 
+-        simulation_state.AddActor(actor_id, kinematic_state, attributes, tl_state);
+-      } else {
+-        simulation_state.UpdateKinematicState(actor_id, kinematic_state);
++        // Identify occupied waypoints (reject off-road / parked vehicles far from any lane).
++        cg::Vector3D extent = vehicle_ptr->GetBoundingBox().extent;
++        cg::Vector3D heading_vector = actor_transform.GetForwardVector();
++        std::vector<cg::Location> corners = {actor_location + cg::Location(extent.x * heading_vector),
++                                             actor_location,
++                                             actor_location + cg::Location(-extent.x * heading_vector)};
++        for (cg::Location &vertex: corners) {
++          SimpleWaypointPtr nearest_waypoint = local_map->GetWaypoint(vertex);
++          if (nearest_waypoint != nullptr &&
++              cg::Math::DistanceSquared2D(vertex, nearest_waypoint->GetLocation()) <= kMaxVehicleWaypointDistSq) {
++            nearest_waypoints.push_back(nearest_waypoint);
++          }
++        }
+       }
++      else if (!type_id.empty() && type_id.front() == 'w') {
++        auto walker_ptr = std::static_pointer_cast<cc::Walker>(actor_ptr);
++
++        if (state_entry_not_present) {
++          dimensions = walker_ptr->GetBoundingBox().extent;
++          actor_type = ActorType::Pedestrian;
++          StaticAttributes attributes {actor_type, dimensions.x, dimensions.y, dimensions.z};
++
++          simulation_state.AddActor(actor_id, kinematic_state, attributes, tl_state);
++        } else {
++          simulation_state.UpdateKinematicState(actor_id, kinematic_state);
++        }
+ 
+-      // Identify occupied waypoints.
+-      SimpleWaypointPtr nearest_waypoint = local_map->GetWaypoint(actor_location);
+-      if (nearest_waypoint != nullptr) {
+-        nearest_waypoints.push_back(nearest_waypoint);
++        // Only project walkers actually on or entering a carriageway/crosswalk,
++        // not pedestrians walking metres away on sidewalks.
++        SimpleWaypointPtr nearest_waypoint = local_map->GetWaypoint(actor_location);
++        if (nearest_waypoint != nullptr &&
++            cg::Math::DistanceSquared2D(actor_location, nearest_waypoint->GetLocation()) <= kMaxWalkerWaypointDistSq) {
++          nearest_waypoints.push_back(nearest_waypoint);
++        }
+       }
++
++      track_traffic.UpdateUnregisteredGridPosition(actor_id, nearest_waypoints);
++    } catch (const std::exception &e) {
++      log_debug("Traffic Manager: dropping unregistered actor", actor_id, ":", e.what());
++      vanished_unregistered.push_back(actor_id);
+     }
++  }
+ 
+-    track_traffic.UpdateUnregisteredGridPosition(actor_id, nearest_waypoints);
++  for (const ActorId actor_id : vanished_unregistered) {
++    RemoveActor(actor_id, false);
+   }
+ }
+ 
 diff --git a/Unreal/CarlaUnreal/Config/DefaultGame.ini b/Unreal/CarlaUnreal/Config/DefaultGame.ini
 index 528f38b..99ef5b4 100644
 --- a/Unreal/CarlaUnreal/Config/DefaultGame.ini
@@ -215,19 +403,57 @@ index a9d39fd..cb85862 100644
    /// Dictionary for translating the JSON file "decal_names" array
    /// to already loaded Material Instances, which are used to apply on the roads
    UPROPERTY()
+diff --git a/Unreal/CarlaUnreal/Plugins/Carla/Source/Carla/Game/CarlaEpisode.cpp b/Unreal/CarlaUnreal/Plugins/Carla/Source/Carla/Game/CarlaEpisode.cpp
+index 8cf0ea1..0e57a02 100644
+--- a/Unreal/CarlaUnreal/Plugins/Carla/Source/Carla/Game/CarlaEpisode.cpp
++++ b/Unreal/CarlaUnreal/Plugins/Carla/Source/Carla/Game/CarlaEpisode.cpp
+@@ -31,6 +31,7 @@
+ #include "CollisionQueryParams.h"
+ #include "Components/CapsuleComponent.h"
+ #include "Engine/OverlapResult.h"
++#include "HAL/IConsoleManager.h"
+ #include "HAL/PlatformProcess.h"
+ #include "Components/WorldPartitionStreamingSourceComponent.h"
+ #include "WorldPartition/WorldPartition.h"
+@@ -665,10 +666,23 @@ TPair<EActorSpawnResultStatus, FCarlaActor*> UCarlaEpisode::SpawnActorWithInfo(
+           thisActorDescription.Variations.Find("role_name");
+       const bool bIsHero = Attribute && (Attribute->Value.Contains("hero") ||
+                                          Attribute->Value.Contains("ego_vehicle"));
++      static TAutoConsoleVariable<float> CVarCarlaHeroStreamingRadiusCm(
++          TEXT("carla.Streaming.HeroRadiusCm"),
++          0.0f,
++          TEXT("Override World Partition streaming radius (in cm) for role_name=hero "
++               "vehicles when EpisodeSettings.TileStreamingDistance is at its 300000 cm "
++               "(3 km) default. 0 uses EpisodeSettings.TileStreamingDistance."),
++          ECVF_Default);
++      float HeroRadius = EpisodeSettings.TileStreamingDistance;
++      const float OverrideRadius = CVarCarlaHeroStreamingRadiusCm.GetValueOnGameThread();
++      if (OverrideRadius > 0.0f && FMath::IsNearlyEqual(HeroRadius, 300000.0f, 1.0f))
++      {
++        HeroRadius = OverrideRadius;
++      }
+       auto* Source = NewObject<UWorldPartitionStreamingSourceComponent>(Actor);
+       FStreamingSourceShape Shape;
+       Shape.bUseGridLoadingRange = false;
+-      Shape.Radius = bIsHero ? EpisodeSettings.TileStreamingDistance : 20000.0f;
++      Shape.Radius = bIsHero ? HeroRadius : 20000.0f;
+       Source->Shapes.Add(Shape);
+       Source->RegisterComponent();
+ 
 diff --git a/Unreal/CarlaUnreal/Plugins/Carla/Source/Carla/Game/CarlaGameModeBase.cpp b/Unreal/CarlaUnreal/Plugins/Carla/Source/Carla/Game/CarlaGameModeBase.cpp
-index 69a9648..dae986f 100644
+index 69a9648..dc0f629 100644
 --- a/Unreal/CarlaUnreal/Plugins/Carla/Source/Carla/Game/CarlaGameModeBase.cpp
 +++ b/Unreal/CarlaUnreal/Plugins/Carla/Source/Carla/Game/CarlaGameModeBase.cpp
-@@ -37,6 +37,7 @@
+@@ -37,6 +37,8 @@
  #include "DrawDebugHelpers.h"
  #include "Kismet/KismetSystemLibrary.h"
  #include "Misc/PackageName.h"
++#include "Components/WorldPartitionStreamingSourceComponent.h"
 +#include "WorldPartition/WorldPartitionSubsystem.h"
  #include <util/ue-header-guard-end.h>
  
  namespace cr = carla::road;
-@@ -329,6 +330,14 @@ void ACarlaGameModeBase::BeginPlay()
+@@ -329,6 +331,14 @@ void ACarlaGameModeBase::BeginPlay()
          this, &ACarlaGameModeBase::OnLevelAddedToWorld);
    }
  
@@ -242,7 +468,7 @@ index 69a9648..dae986f 100644
    // HACK: fix transparency see-through issues
    // The problem: transparent objects are visible through walls.
    // This is due to a weird interaction between the SkyAtmosphere component,
-@@ -592,9 +601,41 @@ void ACarlaGameModeBase::OnLevelAddedToWorld(ULevel* InLevel, UWorld* InWorld)
+@@ -592,9 +602,42 @@ void ACarlaGameModeBase::OnLevelAddedToWorld(ULevel* InLevel, UWorld* InWorld)
    }
  }
  
@@ -255,8 +481,8 @@ index 69a9648..dae986f 100644
 +  }
 +
 +  // Streaming state updates fire every time a source moves, far more often
-+  // than cells actually appear. Tagging is idempotent but walks every actor,
-+  // so rate-limit it.
++  // than cells actually appear. Tag only newly arrived actors (keyed on
++  // FObjectKey) rather than re-walking all ~65,000 components on Big_City_LVL.
 +  const double Now = World->GetTimeSeconds();
 +  if (Now - LastStreamingRetagTime < 1.0)
 +  {
@@ -264,11 +490,12 @@ index 69a9648..dae986f 100644
 +  }
 +  LastStreamingRetagTime = Now;
 +
-+  ATagger::TagActorsInLevel(*World, true);
++  ATagger::TagNewActorsInWorld(*World, TaggedStreamingActors, true);
 +}
 +
  void ACarlaGameModeBase::EndPlay(const EEndPlayReason::Type EndPlayReason)
  {
++  TaggedStreamingActors.Reset();
    FWorldDelegates::LevelAddedToWorld.RemoveAll(this);
 +  if (StreamingStateUpdatedHandle.IsValid())
 +  {
@@ -284,11 +511,51 @@ index 69a9648..dae986f 100644
    FCarlaStaticDelegates::OnEpisodeSettingsChange.Remove(OnEpisodeSettingsChangeHandle);
  
    Episode->EndPlay();
+@@ -1072,4 +1115,31 @@ void ACarlaGameModeBase::OnUnloadStreamLevel()
+ void ACarlaGameModeBase::OnEpisodeSettingsChanged(const FEpisodeSettings &Settings)
+ {
+   CarlaSettingsDelegate->SetAllActorsDrawDistance(GetWorld(), Settings.MaxCullingDistance);
++
++  if (Episode != nullptr && GetWorld() != nullptr && GetWorld()->GetWorldPartition() != nullptr)
++  {
++    for (const auto &Pair : Episode->GetActorRegistry())
++    {
++      const FCarlaActor *View = Pair.Value.Get();
++      if (View == nullptr || View->IsDormant() || View->GetActor() == nullptr)
++      {
++        continue;
++      }
++      const FActorInfo *Info = View->GetActorInfo();
++      const FActorAttribute *Role = Info ? Info->Description.Variations.Find(TEXT("role_name")) : nullptr;
++      const bool bIsHero = Role && (Role->Value.Contains(TEXT("hero")) ||
++                                    Role->Value.Contains(TEXT("ego_vehicle")));
++      if (!bIsHero)
++      {
++        continue;
++      }
++      if (auto *Source = View->GetActor()->FindComponentByClass<UWorldPartitionStreamingSourceComponent>())
++      {
++        for (FStreamingSourceShape &Shape : Source->Shapes)
++        {
++          Shape.Radius = Settings.TileStreamingDistance;
++        }
++      }
++    }
++  }
+ }
 diff --git a/Unreal/CarlaUnreal/Plugins/Carla/Source/Carla/Game/CarlaGameModeBase.h b/Unreal/CarlaUnreal/Plugins/Carla/Source/Carla/Game/CarlaGameModeBase.h
-index 58383e2..64894d9 100644
+index 58383e2..82650e8 100644
 --- a/Unreal/CarlaUnreal/Plugins/Carla/Source/Carla/Game/CarlaGameModeBase.h
 +++ b/Unreal/CarlaUnreal/Plugins/Carla/Source/Carla/Game/CarlaGameModeBase.h
-@@ -180,6 +180,14 @@ private:
+@@ -27,6 +27,7 @@
+ #include "CoreMinimal.h"
+ #include "GameFramework/GameModeBase.h"
+ #include "MapGen/LargeMapManager.h"
++#include "UObject/ObjectKey.h"
+ #include <util/ue-header-guard-end.h>
+ 
+ #include <optional>
+@@ -180,6 +181,14 @@ private:
    /// untagged (semantic segmentation rendered them unlabeled).
    void OnLevelAddedToWorld(ULevel* InLevel, UWorld* InWorld);
  
@@ -303,7 +570,7 @@ index 58383e2..64894d9 100644
    void SpawnActorFactories();
  
    void GenerateSpawnPoints();
-@@ -235,6 +243,12 @@ private:
+@@ -235,6 +244,16 @@ private:
  
    FDelegateHandle OnEpisodeSettingsChangeHandle;
  
@@ -313,11 +580,15 @@ index 58383e2..64894d9 100644
 +  /// often than cells actually appear.
 +  double LastStreamingRetagTime = 0.0;
 +
++  /// Actors already tagged during this episode, keyed on FObjectKey(Actor)
++  /// (index + serial number) so streamed-out/streamed-in actors never collide.
++  TMap<FObjectKey, int32> TaggedStreamingActors;
++
    std::optional<carla::road::Map> Map;
  
    int PendingLevelsToLoad = 0;
 diff --git a/Unreal/CarlaUnreal/Plugins/Carla/Source/Carla/Game/Tagger.cpp b/Unreal/CarlaUnreal/Plugins/Carla/Source/Carla/Game/Tagger.cpp
-index 4d91377..db3a028 100644
+index 4d91377..7a52cba 100644
 --- a/Unreal/CarlaUnreal/Plugins/Carla/Source/Carla/Game/Tagger.cpp
 +++ b/Unreal/CarlaUnreal/Plugins/Carla/Source/Carla/Game/Tagger.cpp
 @@ -13,8 +13,13 @@
@@ -334,7 +605,7 @@ index 4d91377..db3a028 100644
  #include <util/ue-header-guard-end.h>
  
  namespace crp = carla::rpc;
-@@ -60,6 +65,219 @@ crp::CityObjectLabel ATagger::GetLabelByFolderName(const FString &String) {
+@@ -60,6 +65,227 @@ crp::CityObjectLabel ATagger::GetLabelByFolderName(const FString &String) {
    else                               return crp::CityObjectLabel::None;
  }
  
@@ -419,13 +690,20 @@ index 4d91377..db3a028 100644
 +    { TEXT("/Game/Crowd"),                    crp::CityObjectLabel::Pedestrians  },
 +    { TEXT("/Game/Character"),                crp::CityObjectLabel::Pedestrians  },
 +
-+    // --- terrain and background -------------------------------------------
++    // --- terrain, sky, and background -------------------------------------
++    { TEXT("/Game/Lighting/Mesh"),            crp::CityObjectLabel::Sky          },
++    { TEXT("/Engine/EngineSky"),              crp::CityObjectLabel::Sky          },
 +    { TEXT("/Game/Environment/Freeway"),      crp::CityObjectLabel::Roads        },
++    { TEXT("/Game/Environment/Underpass"),    crp::CityObjectLabel::Bridge       },
 +    { TEXT("/Game/Environment"),              crp::CityObjectLabel::Terrain      },
++    { TEXT("/Game/Map/Environment"),          crp::CityObjectLabel::Terrain      },
 +    { TEXT("/Game/Megascans/3D_Assets"),      crp::CityObjectLabel::Static       },
 +    { TEXT("/Game/Megascans"),                crp::CityObjectLabel::Terrain      },
 +    { TEXT("/Game/City"),                     crp::CityObjectLabel::Static       },
 +    { TEXT("/Game/Effect"),                   crp::CityObjectLabel::Other        },
++    { TEXT("/Game/AI/Traffic/Visualization"), crp::CityObjectLabel::Other        },
++    { TEXT("/Engine/EditorMeshes"),           crp::CityObjectLabel::Other        },
++    { TEXT("/Engine/BasicShapes"),            crp::CityObjectLabel::Static       },
 +
 +    // World Partition HLOD proxy meshes live in the HLOD actor's own hashed
 +    // external package, NOT in /Game/Map/HLOD (which holds only the five
@@ -530,11 +808,12 @@ index 4d91377..db3a028 100644
 +  }
 +  for (const FCarlaPathLabelRule &Rule : GPathLabelRules)
 +  {
-+    // Anchor at a folder or kit boundary so "/Game/Prop" does not also swallow
-+    // a future "/Game/Props". The bare-prefix branch is deliberate: several
-+    // rules end in '_' and are meant to match mid-name.
++    // Anchor at a folder, asset ('.'), or kit boundary so "/Game/Prop" does not
++    // also swallow a future "/Game/Props", while asset-exact rules such as
++    // "/Game/Lighting/Mesh/SM_dome" match "/Game/Lighting/Mesh/SM_dome.SM_dome".
 +    if (Path.Equals(Rule.Prefix, ESearchCase::IgnoreCase) ||
 +        Path.StartsWith(Rule.Prefix + TEXT("/"), ESearchCase::IgnoreCase) ||
++        Path.StartsWith(Rule.Prefix + TEXT("."), ESearchCase::IgnoreCase) ||
 +        (Rule.Prefix.EndsWith(TEXT("_")) &&
 +         Path.StartsWith(Rule.Prefix, ESearchCase::IgnoreCase)))
 +    {
@@ -554,7 +833,7 @@ index 4d91377..db3a028 100644
  void ATagger::SetStencilValue( UPrimitiveComponent &Component, const uint32 ActorID, const crp::CityObjectLabel &Label, const bool bSetRenderCustomDepth) 
  {
  
-@@ -127,8 +345,65 @@ static void ATagger_SetLabelTag(UPrimitiveComponent &Component, crp::CityObjectL
+@@ -127,8 +353,65 @@ static void ATagger_SetLabelTag(UPrimitiveComponent &Component, crp::CityObjectL
    Component.ComponentTags.Insert(FName(*ATagger::GetTagAsString(Label)), 0);
  }
  
@@ -620,7 +899,7 @@ index 4d91377..db3a028 100644
  #ifdef CARLA_TAGGER_EXTRA_LOG
    UE_LOG(LogCarla, Log, TEXT("Actor: %s"), *Actor.GetName());
  #endif // CARLA_TAGGER_EXTRA_LOG
-@@ -140,6 +415,14 @@ void ATagger::TagActor(const AActor &Actor, bool bTagForSemanticSegmentation)
+@@ -140,6 +423,14 @@ void ATagger::TagActor(const AActor &Actor, bool bTagForSemanticSegmentation)
    for (UStaticMeshComponent *Component : StaticMeshComponents) 
    {
      auto Label = GetLabelByPath(Component->GetStaticMesh());
@@ -635,7 +914,7 @@ index 4d91377..db3a028 100644
      if (Label == crp::CityObjectLabel::Pedestrians && Cast<ACarlaWheeledVehicle>(&Actor))
      {
        Label = crp::CityObjectLabel::Rider;
-@@ -159,6 +442,14 @@ void ATagger::TagActor(const AActor &Actor, bool bTagForSemanticSegmentation)
+@@ -159,6 +450,14 @@ void ATagger::TagActor(const AActor &Actor, bool bTagForSemanticSegmentation)
  
    for (USkeletalMeshComponent *Component : SkeletalMeshComponents) {
      auto Label = GetLabelByPath(Component->GetPhysicsAsset());
@@ -650,7 +929,7 @@ index 4d91377..db3a028 100644
      if (Label == crp::CityObjectLabel::Pedestrians && Cast<ACarlaWheeledVehicle>(&Actor))
      {
        Label = crp::CityObjectLabel::Rider;
-@@ -176,17 +467,21 @@ void ATagger::TagActor(const AActor &Actor, bool bTagForSemanticSegmentation)
+@@ -176,17 +475,69 @@ void ATagger::TagActor(const AActor &Actor, bool bTagForSemanticSegmentation)
  
  void ATagger::TagActorsInLevel(UWorld &World, bool bTagForSemanticSegmentation)
  {
@@ -669,10 +948,58 @@ index 4d91377..db3a028 100644
      TagActor(*Actor, bTagForSemanticSegmentation);
    }
 +  LogTaggerCensus(TEXT("level"));
++}
++
++int32 ATagger::TagNewActorsInWorld(
++    UWorld &World,
++    TMap<FObjectKey, int32> &TaggedActors,
++    bool bTagForSemanticSegmentation)
++{
++  GTaggerStats = FTaggerStats{};
++  int32 NewlyTaggedActors = 0;
++  int32 TotalActors = 0;
++  for (TActorIterator<AActor> it(&World); it; ++it)
++  {
++    AActor *Actor = *it;
++    if (Actor == nullptr)
++    {
++      continue;
++    }
++    ++TotalActors;
++    TInlineComponentArray<UStaticMeshComponent *> StaticComps(Actor);
++    TInlineComponentArray<USkeletalMeshComponent *> SkelComps(Actor);
++    const int32 CompCount = StaticComps.Num() + SkelComps.Num();
++    const FObjectKey Key(Actor);
++    if (const int32 *PrevCount = TaggedActors.Find(Key))
++    {
++      if (*PrevCount == CompCount)
++      {
++        continue;
++      }
++    }
++    TagActor(*Actor, bTagForSemanticSegmentation);
++    TaggedActors.Add(Key, CompCount);
++    ++NewlyTaggedActors;
++  }
++  if (TaggedActors.Num() > TotalActors * 2 + 128)
++  {
++    for (auto MapIt = TaggedActors.CreateIterator(); MapIt; ++MapIt)
++    {
++      if (MapIt.Key().ResolveObjectPtr() == nullptr)
++      {
++        MapIt.RemoveCurrent();
++      }
++    }
++  }
++  if (NewlyTaggedActors > 0)
++  {
++    LogTaggerCensus(TEXT("streaming-delta"));
++  }
++  return NewlyTaggedActors;
  }
  
  crp::CityObjectLabel ATagger::GetTagFromName(const FName &Tag)
-@@ -218,6 +513,39 @@ crp::CityObjectLabel ATagger::GetTagOfTaggedComponent(const UPrimitiveComponent
+@@ -218,6 +569,39 @@ crp::CityObjectLabel ATagger::GetTagOfTaggedComponent(const UPrimitiveComponent
    return static_cast<crp::CityObjectLabel>(Component.CustomDepthStencilValue);
  }
  
@@ -713,10 +1040,17 @@ index 4d91377..db3a028 100644
  {
    TArray<UPrimitiveComponent *> Components;
 diff --git a/Unreal/CarlaUnreal/Plugins/Carla/Source/Carla/Game/Tagger.h b/Unreal/CarlaUnreal/Plugins/Carla/Source/Carla/Game/Tagger.h
-index 6bc03b6..2ca818f 100644
+index 6bc03b6..b031eb0 100644
 --- a/Unreal/CarlaUnreal/Plugins/Carla/Source/Carla/Game/Tagger.h
 +++ b/Unreal/CarlaUnreal/Plugins/Carla/Source/Carla/Game/Tagger.h
-@@ -19,6 +19,8 @@
+@@ -13,12 +13,15 @@
+ #include <util/ue-header-guard-begin.h>
+ #include "GameFramework/Actor.h"
+ #include "Components/PrimitiveComponent.h"
++#include "UObject/ObjectKey.h"
+ #include <util/ue-header-guard-end.h>
+ 
+ #include "Tagger.generated.h"
  
  namespace crp = carla::rpc;
  
@@ -725,8 +1059,17 @@ index 6bc03b6..2ca818f 100644
  /// Sets actors' custom depth stencil value for semantic segmentation according
  /// to their meshes.
  ///
-@@ -52,6 +54,28 @@ public:
+@@ -50,8 +53,37 @@ public:
  
+   static void TagActorsInLevel(ULevel &Level, bool bTagForSemanticSegmentation);
+ 
++  /// Tag only newly streamed actors (or actors whose mesh component count
++  /// changed), keyed on FObjectKey(Actor) so recycled pointers never match.
++  static int32 TagNewActorsInWorld(
++      UWorld &World,
++      TMap<FObjectKey, int32> &TaggedActors,
++      bool bTagForSemanticSegmentation);
++
    /// Retrieve the tag of an already tagged component.
    static crp::CityObjectLabel GetTagOfTaggedComponent(const UPrimitiveComponent &Component);
 +
@@ -754,7 +1097,7 @@ index 6bc03b6..2ca818f 100644
    
    /// Retrieve the tags of an already tagged actor. CityObjectLabel::None is
    /// not added to the array.
-@@ -75,6 +99,27 @@ public:
+@@ -75,6 +107,27 @@ public:
    /// Method that computes the label corresponding to a folder path
    static crp::CityObjectLabel GetLabelByFolderName(const FString &String);
  
@@ -782,7 +1125,7 @@ index 6bc03b6..2ca818f 100644
    /// Method that computes the label corresponding to an specific object
    /// using the folder path in which it is stored
    template <typename T>
-@@ -87,6 +132,15 @@ public:
+@@ -87,6 +140,15 @@ public:
        return crp::CityObjectLabel::None;
      }
      const FString Path = Object->GetPathName();

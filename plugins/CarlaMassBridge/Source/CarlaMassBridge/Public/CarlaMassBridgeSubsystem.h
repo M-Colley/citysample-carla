@@ -42,11 +42,6 @@ class UCarlaEpisode;
 ///    FVehicleActor::SetActorAutopilot has an empty dormant branch and still
 ///    returns Success, and ApplyControlToVehicle writes to FActorData that this
 ///    subsystem overwrites on the next frame. Treat them as observations.
-///  * DO NOT run CARLA's Traffic Manager with the bridge enabled. The TM calls
-///    world.GetActors() every cycle and ALSM adopts any unregistered actor whose
-///    type id starts with 'v', with no dormant check - so it would take every
-///    proxy as an unregistered vehicle and run a waypoint search per bounding
-///    box corner for each one.
 ///  * Disabled by default. Enable with `carla.MassBridge.Enable 1`, which is
 ///    read every frame so it can be flipped at runtime; turning it off
 ///    deregisters every proxy, returning the registry to its baseline.
@@ -71,10 +66,9 @@ public:
 
     /// Where to measure "near" from, in world space.
     ///
-    /// The CARLA spectator, which the server moves to follow whatever the
-    /// client is looking through, falling back to the world origin. This is
-    /// what decides WHICH Mass entities get mirrored when there are more of
-    /// them than the budget allows.
+    /// Prefers an active `role_name=hero` / `ego_vehicle` actor when
+    /// `carla.MassBridge.FollowHero` is non-zero (default), falling back to the
+    /// CARLA spectator pawn and then the world origin.
     FVector GetObserverLocation() const;
 
     /// Called by the processor before it sweeps entities.
@@ -123,6 +117,10 @@ private:
     /// Entities seen during the current sweep.
     TSet<FMassEntityHandle> SeenThisFrame;
 
-    /// Logged once, so a student who forgets the Traffic Manager caveat sees it.
+    /// Cached active hero actor id for GetObserverLocation().
+    mutable uint32 CachedHeroId = 0;
+    mutable double LastHeroScanTime = -1.0;
+
+    /// Logged once when the bridge begins mirroring entities.
     bool bWarnedAboutTrafficManager = false;
 };

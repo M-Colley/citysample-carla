@@ -33,11 +33,12 @@ param(
                        else { "C:\carla-ue58\UnrealEngine5_carla" }),
     [ValidateSet("Development", "DebugGame", "")]
     [string] $Configuration = "",
-    [string] $LogDir = (Join-Path $PSScriptRoot "..\logs"),
+    [string] $LogDir = "",
     [switch] $Clean
 )
 
 $ErrorActionPreference = "Stop"
+if (-not $LogDir) { $LogDir = Join-Path $PSScriptRoot "..\logs" }
 
 $uproject = Join-Path $CitySample "CitySample.uproject"
 $buildBat = Join-Path $EnginePath "Engine\Build\BatchFiles\Build.bat"

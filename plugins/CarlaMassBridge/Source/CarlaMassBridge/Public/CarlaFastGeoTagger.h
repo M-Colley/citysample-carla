@@ -34,7 +34,7 @@
 /// with the same ATagger::GetLabelByAssetPath rule table used everywhere else,
 /// and writes the label into custom primitive data in CARLA's slot.
 ///
-/// Off by default: `carla.FastGeoTagger.Enable 1`.
+/// Enabled by default (`carla.FastGeoTagger.Enable 1`); pass `0` to disable.
 UCLASS()
 class CARLAMASSBRIDGE_API UCarlaFastGeoTaggerSubsystem : public UWorldSubsystem
 {
@@ -62,23 +62,32 @@ private:
 
     FDelegateHandle StreamingStateUpdatedHandle;
 
-    /// Counters from the last sweep, for NumTagged()/NumSeen(). The sweep
-    /// itself keeps NO per-component or per-container state: World Partition
-    /// recycles addresses when a container unloads and reloads, so any table
-    /// keyed on a pointer eventually reports new, untagged geometry as done.
-    /// The component's own custom primitive data is the authority instead.
+    /// Counters from the last sweep, for NumTagged()/NumSeen().
     int32 LastSweepSeen = 0;
     int32 LastSweepTaggedTotal = 0;
+    int32 LastLoggedContainers = -1;
 
     /// World time of the last sweep, for the rate limit.
     double LastSweepTime = -1.0;
 
     /// Label per static mesh ASSET (a crp::CityObjectLabel, stored as its
-    /// uint8). A memo of a pure function of the asset path, not tagging
-    /// state: keyed on object index + serial number, so a reused address or
-    /// slot can never hit an old entry. If ATagger::ReloadPathLabelRules is
-    /// ever wired up at runtime, this must be emptied with it.
+    /// uint8). Keyed on FObjectKey (object index + serial number), so a reused
+    /// address or slot can never hit an old entry.
     TMap<FObjectKey, uint8> MeshLabels;
+
+    /// Per-container completion summary keyed on FObjectKey(UFastGeoContainer)
+    /// (object index + serial number - NEVER raw pointer, which FMalloc reuses
+    /// after World Partition unload/reload). Only populated once every
+    /// primitive in that UFastGeoContainer has its render state created and
+    /// verified, avoiding 4 Hz walks over 1.1M resident Big_City_LVL primitives.
+    struct FCompletedContainerInfo
+    {
+        int32 TotalPrimitives = 0;
+        int32 SeenStatic = 0;
+        int32 Tagged = 0;
+        int32 Unmatched = 0;
+    };
+    TMap<FObjectKey, FCompletedContainerInfo> CompletedContainers;
 
     FTimerHandle SweepTimerHandle;
 };
