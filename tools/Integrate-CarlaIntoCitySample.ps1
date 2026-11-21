@@ -65,7 +65,8 @@ param(
     [string] $BigCityOpenDrive,
     [string] $BigCityNavMesh,
     [switch] $CheckOnly,
-    [switch] $Undo
+    [switch] $Undo,
+    [switch] $RevertCarlaPatch
 )
 
 $ErrorActionPreference = "Stop"
@@ -190,6 +191,26 @@ if ($Undo) {
         $current = [System.IO.File]::ReadAllText($scalabilityIni)
         $remaining = Remove-ScalabilityDefaults $current
         if ($remaining -ne $current) { [System.IO.File]::WriteAllText($scalabilityIni, $remaining) }
+    }
+    if ($RevertCarlaPatch -and (Test-Path -LiteralPath $CarlaRoot)) {
+        $head = Get-GitHead $CarlaRoot
+        $pName = if ($head -eq $releaseCommit) { "carla-1.0-citysample.patch" } else { "carla-ue58-plugin-build-fixes.patch" }
+        $pPath = Join-Path $PSScriptRoot "..\patches\$pName"
+        if (Test-Path -LiteralPath $pPath) {
+            $prevEap = $ErrorActionPreference
+            $ErrorActionPreference = 'Continue'
+            try {
+                & git -C $CarlaRoot apply --reverse --check $pPath 2>$null
+                if ($LASTEXITCODE -eq 0) {
+                    & git -C $CarlaRoot apply --reverse $pPath
+                    Ok "reverted $pName in $CarlaRoot"
+                } else {
+                    Note "$pName not currently applied in $CarlaRoot"
+                }
+            } finally {
+                $ErrorActionPreference = $prevEap
+            }
+        }
     }
     Say "`nreverted.`n" "Cyan"
     exit 0
