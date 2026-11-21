@@ -121,6 +121,32 @@ def label_panel(arr: np.ndarray, text: str) -> Image.Image:
     return im
 
 
+def has_parallel_lane(carla_map, wp) -> bool:
+    """True when `wp` (or its exit from a junction) has an adjacent same-way lane."""
+    cur = wp
+    for _ in range(8):
+        if cur is None or not cur.is_junction:
+            break
+        nxt = cur.next(4.0)
+        cur = nxt[0] if nxt else None
+    if cur is None:
+        return False
+    loc = cur.transform.location
+    fwd = cur.transform.get_forward_vector()
+    rx, ry = -fwd.y, fwd.x
+    for side in (-3.6, 3.6):
+        probe = carla.Location(loc.x + rx * side, loc.y + ry * side, loc.z)
+        cand = carla_map.get_waypoint(probe, project_to_road=True,
+                                      lane_type=carla.LaneType.Driving)
+        if cand is None or cand.id == cur.id or cand.road_id == cur.road_id:
+            continue
+        if cand.transform.location.distance(probe) <= 2.0:
+            cfwd = cand.transform.get_forward_vector()
+            if cfwd.x * fwd.x + cfwd.y * fwd.y > 0.75:
+                return True
+    return False
+
+
 def branch_reach(wp, limit: float = 300.0, step: float = 10.0) -> float:
     """How far `wp` can travel along driving successors before hitting a dead end."""
     dist = 0.0
@@ -177,11 +203,15 @@ class RouteDriver:
             if len(nxt) == 1:
                 wp = nxt[0]
             else:
-                # Prefer branches that do not terminate at a map-edge dead end.
-                scored = [(branch_reach(c, 300.0), c) for c in nxt]
-                best = max(s for s, _ in scored)
-                viable = [c for s, c in scored if s >= max(100.0, best - 20.0)]
-                wp = random.choice(viable or nxt)
+                # Prefer branches that do not terminate at a map-edge dead end
+                # and lead onto multi-lane avenues with passing room.
+                scored = [(branch_reach(c, 300.0), has_parallel_lane(self.map, c), c)
+                          for c in nxt]
+                best = max(s for s, _, _ in scored)
+                viable = [(m, c) for s, m, c in scored if s >= max(100.0, best - 20.0)]
+                multi = [c for m, c in viable if m]
+                pool = multi or [c for _, c in viable] or nxt
+                wp = random.choice(pool)
             self.route.append(wp)
 
     def _try_adjacent_lane(self, loc, fwd) -> bool:
@@ -319,6 +349,10 @@ def main() -> int:
                     help="PRNG seed for choosing the ego spawn point (default 7)")
     ap.add_argument("--gif", action="store_true",
                     help="also write a smaller .gif next to the .mp4")
+    ap.add_argument("--gif-start", type=float, default=0.0,
+                    help="start offset in seconds for --gif (default 0)")
+    ap.add_argument("--gif-seconds", type=float, default=22.0,
+                    help="max duration in seconds for --gif so README loops stay under GitHub's 10 MB inline cap (default 22)")
     args = ap.parse_args()
 
     # Set before anything reads them: the panel helpers and the LiDAR
@@ -384,14 +418,20 @@ def main() -> int:
             ego_bp.set_attribute("role_name", "hero")
         cmap = world.get_map()
         ego_spawn = None
-        for sp in random.sample(spawns, len(spawns)):
-            start_wp = cmap.get_waypoint(sp.location, project_to_road=True,
-                                         lane_type=carla.LaneType.Driving)
-            if start_wp is not None and branch_reach(start_wp, 350.0) < 300.0:
-                continue
-            ego = world.try_spawn_actor(ego_bp, sp)
+        shuffled = random.sample(spawns, len(spawns))
+        for require_multi in (True, False):
+            for sp in shuffled:
+                start_wp = cmap.get_waypoint(sp.location, project_to_road=True,
+                                             lane_type=carla.LaneType.Driving)
+                if start_wp is not None and branch_reach(start_wp, 350.0) < 300.0:
+                    continue
+                if require_multi and (start_wp is None or not has_parallel_lane(cmap, start_wp)):
+                    continue
+                ego = world.try_spawn_actor(ego_bp, sp)
+                if ego:
+                    ego_spawn = sp
+                    break
             if ego:
-                ego_spawn = sp
                 break
         if ego is None:
             print("could not spawn an ego")
@@ -632,14 +672,20 @@ def main() -> int:
             gif = os.path.splitext(args.output)[0] + ".gif"
             print(f"encoding {gif}")
             # Two passes: a palette generated from the whole clip avoids the
-            # dithering swim you get from per-frame palettes.
+            # dithering swim you get from per-frame palettes. Cap duration so
+            # long recordings still produce a GitHub-inline-sized (<10 MB) GIF.
             pal = os.path.join(tmpdir, "pal.png")
+            trim = []
+            if args.gif_start > 0:
+                trim += ["-ss", f"{args.gif_start:.2f}"]
+            if args.gif_seconds > 0 and args.seconds > args.gif_seconds:
+                trim += ["-t", f"{args.gif_seconds:.2f}"]
             subprocess.run(["ffmpeg", "-y", "-loglevel", "error",
-                            "-i", args.output, "-vf",
+                            *trim, "-i", args.output, "-vf",
                             "fps=10,scale=800:-1:flags=lanczos,palettegen",
                             pal], check=True)
             subprocess.run(["ffmpeg", "-y", "-loglevel", "error",
-                            "-i", args.output, "-i", pal, "-lavfi",
+                            *trim, "-i", args.output, "-i", pal, "-lavfi",
                             "fps=10,scale=800:-1:flags=lanczos[x];[x][1:v]paletteuse",
                             gif], check=True)
             print(f"  {gif}  {os.path.getsize(gif) / 1e6:.1f} MB")

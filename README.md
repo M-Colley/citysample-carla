@@ -8,10 +8,10 @@ CARLA traffic, real CARLA sensors.
 
 ![CARLA driving through the City Sample, four sensors at once](docs/citysample-carla.gif)
 
-*Four synchronised CARLA sensors on Epic's City Sample: RGB, semantic
-segmentation, depth, and a top-down LiDAR sweep. Every panel is a thing that
-returned nothing at all before the fixes in this repository. Recorded with
-`python tools/record_carla.py --gif` — the full 26-second clip is
+*Four synchronised CARLA 1.0 sensors on Epic's City Sample (`Big_City_LVL`):
+RGB, semantic segmentation, depth, and a top-down LiDAR sweep. Every panel is a
+thing that returned nothing at all before the fixes in this repository.
+Recorded with `python tools/record_carla.py --gif` — the full 3-minute drive is
 [docs/citysample-carla.mp4](docs/citysample-carla.mp4).*
 
 There are two halves, and you can stop after the first:
@@ -31,12 +31,13 @@ Background: [carla#9852](https://github.com/carla-simulator/carla/issues/9852).
 `b76fce0e3bcb` and content `55228c1ccca1`) and verified end-to-end on both
 `Small_City_LVL` and `Big_City_LVL`: road routing (`200/200` 500 m walks on
 each map), Traffic Manager (`58/58` and `60/60` alive), 355 / 2,176 traffic
-lights across 106 / 619 junctions, 217 / 2,138 stop signs, 605-tile and
-5,495-tile pedestrian navmeshes (`30/30` and `27/30` walkers moving), Mass
-traffic and crowd bridge (`250` proxies, full turnover on spectator
-relocation), RGB/depth/segmentation cameras, semantic and plain LiDAR
-(`0.26–2.9 %` unlabeled, zero ego self-hits), radar (`1,980` and `2,947`
-detections), `ground_projection`, and `cast_ray`.
+lights across 106 / 619 junctions, 209 / 2,133 kerbside stop signs (`0` signal
+or stop-sign poles overlapping driving lanes), 605-tile and 5,495-tile
+pedestrian navmeshes (`30/30` and `27/30` walkers moving), Mass traffic and
+crowd bridge (`250` proxies, full turnover on spectator relocation),
+RGB/depth/segmentation cameras, semantic and plain LiDAR (`0.26–2.9 %`
+unlabeled, zero ego self-hits), radar (`1,980` and `2,947` detections),
+`ground_projection`, and `cast_ray`.
 
 > ### ⚠ Read this before collecting any data
 >
@@ -859,7 +860,8 @@ map               : Map/Small_City_LVL
 topology / spawns : 4,672 segments, 2,263 junction entries, 4,672 spawn points
 route reach       : 200/200 random walks reached 500 m
 traffic manager   : 58/60 spawned, 58/58 alive, 54 moving (median 30 km/h, max 46)
-signals           : 355 traffic lights (106 groups, cycling), 217 stop signs,
+signals           : 355 traffic lights (106 groups, cycling), 209 kerbside stop signs
+                    (+ 20 lane refs, 0 poles overlapping driving lanes, was 239),
                     354/408 red-light samples stationary (87%)
 mass bridge       : 250 dormant proxies (150 vehicles, 100 walkers), both moving,
                     250/250 replaced after a 1,447 m spectator move
@@ -882,7 +884,8 @@ topology / spawns : 33,590 segments, 16,218 junction entries, 33,590 spawn point
 route reach       : 200/200 random walks reached 500 m
 traffic manager   : 60/60 spawned, 60/60 alive, 57 moving (median 30 km/h, max 46)
 signals           : 2,176 traffic lights (619 groups, 5 phase patterns cycling),
-                    2,138 stop signs, 6,222 landmarks, 27/53 red-light samples stationary (51%)
+                    2,133 kerbside stop signs (+ 8 lane refs, 0 poles overlapping
+                    driving lanes, was 1,322), 6,222 landmarks, 27/53 red-light stationary (51%)
 mass bridge       : 250 dormant proxies (150 vehicles, 100 walkers), both moving,
                     250/250 replaced after a 4,529 m spectator move
 sensors           : unparented semantic LiDAR 273,492 pts (0.26% Unlabeled),
