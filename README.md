@@ -20,20 +20,20 @@ You can stop after Part A if you only need the road network, or continue through
 | **[Part A — Road network](#2-part-a--extract-the-road-network)** | `Small_City_LVL` and `Big_City_LVL` exported as ASAM **OpenDRIVE** (`.xodr`) with signals, signs, speed limits, and crosswalks. Runs in any CARLA (`generate_opendrive_world`). | Stock UE 5.8 + City Sample + Python 3.10+ |
 | **[Part B — Full city server](#3-part-b--run-city-sample-as-a-carla-10-server)** | CARLA 1.0 serving the City Sample levels directly — Nanite/Lumen buildings, props, Mass traffic & crowd, pedestrian navmeshes, and full sensor suite. | Also needs CARLA 1.0 + CARLA's UE 5.8 fork built from source (~385 GB disk, 64 GB RAM) |
 
-### Supported Maps (CARLA 1.0, `v1.1.0`)
+### Supported Maps (CARLA 1.0, `v1.1.1`)
 
 | Map | Footprint | Roads & Junctions | Signals & Curbside Signs | Pedestrian NavMesh |
 |---|---|---|---|---|
-| **`Small_City_LVL`** | `1.66 × 1.30 km` (`145 km` lanes) | `3,497` roads · `172` junctions (`4,672` spawns) | `355` lights · `193` stop · `2` yield · `197` speed (`30–90 km/h`) · `1,096` crosswalks | `620` tiles (`5.7 MB`) from `7,846` ZoneGraph pedestrian lanes |
-| **`Big_City_LVL`** | `4.16 × 4.99 km` (`1,197.5 km` lanes) | `23,594` roads · `1,236` junctions (`33,590` spawns) | `2,176` lights · `2,107` stop · `7` yield · `1,356` speed (`30–90 km/h`) · `8,310` crosswalks | `5,591` tiles (`45.8 MB`) from `59,384` ZoneGraph pedestrian lanes |
+| **`Small_City_LVL`** | `1.66 × 1.30 km` (`145 km` lanes) | `2,981` roads (`236` multi-lane) · `172` junctions (`4,672` spawns) | `355` lights · `193` stop · `2` yield · `197` speed (`30–90 km/h`) · `1,096` crosswalks | `620` tiles (`4.8 MB`) from `7,846` ZoneGraph pedestrian lanes |
+| **`Big_City_LVL`** | `4.16 × 4.99 km` (`1,197.5 km` lanes) | `21,712` roads (`1,312` multi-lane) · `1,236` junctions (`33,590` spawns) | `2,176` lights · `2,109` stop · `7` yield · `1,357` speed (`30–90 km/h`) · `8,310` crosswalks | `5,591` tiles (`40.0 MB`) from `59,384` ZoneGraph pedestrian lanes |
 
 > ### Quick Notes Before Collecting Data
 >
-> - **Works out of the box**: RGB, depth, GNSS, IMU, collision sensors, vehicle control, **camera semantic segmentation** (`0.2 %` unlabeled on `Small_City_LVL`, `0.4 %` on `Big_City_LVL`, `Sky` = `11`), **semantic & plain LiDAR** (`1.26 %` unlabeled, `0` ego self-hits), **radar**, `ground_projection`, `cast_ray`, phased traffic lights, stop/yield/speed-limit signs (`0` poles in driving lanes), and crosswalks. (`carla.FastGeoTagger.Enable` defaults to `1`; set `0` if you do not use semantic sensors.)
+> - **Works out of the box**: RGB, depth, GNSS, IMU, collision sensors, vehicle control, mid-block lane changes across multi-lane carriageways, **camera semantic segmentation** (`0.0 %–0.2 %` settled unlabeled on `Small_City_LVL`, `0.4 %` on `Big_City_LVL`, `0.00 %` out-of-range labels from Run 1), **semantic & plain LiDAR** (`1.26 %` unlabeled, `0` ego self-hits), **radar**, `ground_projection`, `cast_ray`, phased traffic lights, stop/yield/speed-limit signs (`0` poles in driving lanes), and exact crosswalks (`0.00 m` offset). (`carla.FastGeoTagger.Enable` and `carla.MassBridge.ExportCarlaObstacles` default to `1`.)
 > - **Two opt-in additions**:
->   - Pass `-ExecCmds "carla.MassBridge.Enable 1"` to mirror Epic's ambient **Mass traffic and crowd** (`150` vehicles + `100` walkers nearest `role_name="hero"` or the spectator) into `world.get_actors()` alongside CARLA's Traffic Manager (§3 Step 6).
+>   - Pass `-ExecCmds "carla.MassBridge.Enable 1"` to mirror Epic's ambient **Mass traffic and crowd** (`150` vehicles + `100` walkers nearest `role_name="hero"` or the spectator) into `world.get_actors()` with **two-way yielding** alongside CARLA's Traffic Manager — or pass `"carla.MassBridge.DisableMassTraffic 1"` for pure CARLA traffic (§3 Step 6).
 >   - Build & install the **Recast navmesh** (`Content\Map\Nav\<Map>.bin`) to enable CARLA walkers and `get_random_location_from_navigation()` (§3 Step 3).
-> - **Caveats**: Discard the very first semantic frame while World Partition finishes initial streaming (~25 s); speed/yield signs are inferred from ZoneGraph metadata; and mirrored Mass vehicles are read-only. See **[Known Limitations](#8-known-limitations)** and **[docs/KNOWN-LIMITATIONS.md](docs/KNOWN-LIMITATIONS.md)**.
+> - **Caveats**: Allow ~20–25 s after moving to a new district for World Partition cells to finish streaming; speed/yield signs are derived from ZoneGraph metadata; and mirrored `.mass.` proxies are read-only. See **[Known Limitations](#8-known-limitations)** and **[docs/KNOWN-LIMITATIONS.md](docs/KNOWN-LIMITATIONS.md)**.
 
 ---
 
@@ -221,7 +221,7 @@ python %CARLA_DIR%/PythonAPI/examples/nvidia/nurec/nurec_runner.py --port 2000 -
 
 ---
 
-## 5. Measured Validation (`v1.1.0` on CARLA 1.0)
+## 5. Measured Validation (`v1.1.1` on CARLA 1.0)
 
 All figures below were measured on the live CARLA `1.0` server (`3ea166118d2c` / UE 5.8 `b76fce0e3bcb`) with `FastGeoTagger` on by default and `MassBridge` enabled:
 
@@ -260,7 +260,7 @@ docs/
   IMPLEMENTATION-PLAN.md    Stage-by-stage architecture and design record
   citysample-carla.*        3-minute 4-sensor Big_City_LVL showcase (<10 MB MP4 & GIF)
   citysample-carla-nurec.*  CARLA 1.0 + NVIDIA NuRec 3DGUT showcase (<10 MB MP4 & GIF)
-ISSUES-TO-FILE.md           13 reproducible upstream CARLA issues (12 filed + 4 fix PRs on carla-simulator/carla)
+ISSUES-TO-FILE.md           13 reproducible upstream CARLA issues (12 filed on carla-simulator/carla)
 ```
 
 ---
@@ -282,7 +282,7 @@ ISSUES-TO-FILE.md           13 reproducible upstream CARLA issues (12 filed + 4 
 
 ## 8. Known Limitations
 
-Remaining architectural caveats are summarized below and documented in detail in **[docs/KNOWN-LIMITATIONS.md](docs/KNOWN-LIMITATIONS.md)** (upstream CARLA bugs and open pull requests are tracked in **[ISSUES-TO-FILE.md](ISSUES-TO-FILE.md)**):
+Remaining architectural caveats are summarized below and documented in detail in **[docs/KNOWN-LIMITATIONS.md](docs/KNOWN-LIMITATIONS.md)** (upstream CARLA bugs are tracked in **[ISSUES-TO-FILE.md](ISSUES-TO-FILE.md)**):
 
 - **World Partition streaming horizon**: `cast_ray()`, `ground_projection()`, and detailed semantic labels apply inside the active World Partition streaming radius around `role_name="hero"` / spectator (`carla.Streaming.HeroRadiusCm` / `world_settings.tile_stream_distance`); unstreamed distant HLODs render cleanly as `Unlabeled (0)` (`0.00 %` invalid IDs) until cells finish streaming (~20–25 s).
 - **Read-only Mass ECS proxies**: Mirrored Mass proxies (`150` vehicles, `100` walkers around `hero`) participate in **two-way** obstacle yielding with CARLA vehicles/walkers (`carla.MassBridge.ExportCarlaObstacles 1`), and ambient Mass traffic/crowd can be turned off via `carla.MassBridge.DisableMassTraffic 1` / `DisableMassCrowd 1`, but individual `.mass.` entities cannot be steered via `apply_control()`.

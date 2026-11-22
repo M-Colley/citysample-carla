@@ -9,8 +9,8 @@ authors:
     # orcid: "https://orcid.org/0000-0000-0000-0000"
 repository-code: "https://github.com/M-Colley/citysample-carla"
 doi: "10.5281/zenodo.22306770"
-version: v1.1.0
-date-released: "2026-11-21"
+version: v1.1.1
+date-released: "2026-11-22"
 identifiers:
   - type: doi
     value: "10.5281/zenodo.22306770"
@@ -21,16 +21,17 @@ identifiers:
 abstract: >-
   Tooling that runs Epic Games' City Sample (Unreal Engine 5.8, both
   Small_City_LVL and Big_City_LVL) as a CARLA 1.0 driving simulator, and
-  extracts the city's road network as ASAM OpenDRIVE so it can be driven in any
-  CARLA. Includes an Unreal plugin that exports Epic's ZoneGraph, converters
-  that produce OpenDRIVE with road-class speed limits, traffic lights, stop
-  signs, yield signs, speed-limit signs and crosswalks, a bridge that mirrors
-  Epic's Mass ECS traffic and crowd around the ego vehicle into the CARLA API
-  while coexisting with CARLA's Traffic Manager, an out-of-the-box semantic
-  tagger for geometry streamed through FastGeoStreaming, a pedestrian navmesh
-  builder backed by Epic's measured ZoneGraph pedestrian lanes, and verified
-  compatibility with CARLA 1.0's NVIDIA NuRec neural reconstruction pipeline.
-  No Epic Games content is redistributed.
+  extracts the city's road network as multi-lane ASAM OpenDRIVE so it can be
+  driven in any CARLA. Includes an Unreal plugin that exports Epic's ZoneGraph,
+  converters that produce multi-lane OpenDRIVE with mid-block lane changes,
+  road-class speed limits, traffic lights, stop signs, yield signs, speed-limit
+  signs and exact reference-line crosswalks, a two-way Mass ECS bridge that
+  mirrors Epic's traffic and crowd around the ego vehicle into the CARLA API
+  while exporting CARLA actors back into Mass as obstacles, an out-of-the-box
+  semantic tagger for geometry streamed through FastGeoStreaming, a pedestrian
+  navmesh builder backed by Epic's measured ZoneGraph pedestrian lanes, and
+  verified compatibility with CARLA 1.0's NVIDIA NuRec neural reconstruction
+  pipeline. No Epic Games content is redistributed.
 keywords:
   - CARLA
   - Unreal Engine

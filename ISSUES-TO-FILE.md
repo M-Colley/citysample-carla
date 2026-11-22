@@ -12,7 +12,7 @@ OpenDRIVE `<laneOffset>` crosswalks.
 Verified against `carla-simulator/carla@de3f38e64` (`ue58-dev-carla`, issues
 1-9) and `carla-simulator/carla@3ea166118d2c` (`1.0` / `ue58-dev`, issues 10-13).
 
-**Filing, upstream PR, & CARLA `1.0` (`3ea166118d2c`) status.** Twelve of the thirteen issues are filed upstream; CARLA `1.0` resolved Issues 2 and 3, while Issues 10–13 are patched locally in `patches/carla-1.0-citysample.patch` and have upstream fix PRs open against `carla-simulator/carla` (`ue58-dev`):
+**Filing & CARLA `1.0` (`3ea166118d2c`) status.** Twelve of the thirteen issues are filed upstream (`OPEN`); CARLA `1.0` resolved Issues 2 and 3, while Issues 10–13 are patched locally in `patches/carla-1.0-citysample.patch` (initial upstream PRs `#10368`–`#10371` were closed by triage pending PR-template and test-suite updates):
 
 | # | upstream | CARLA 1.0 status | title |
 |---|---|---|---|
@@ -25,10 +25,10 @@ Verified against `carla-simulator/carla@de3f38e64` (`ue58-dev-carla`, issues
 | 7 | [#9871](https://github.com/carla-simulator/carla/issues/9871) | **Still open / present** (resolved with measured ZoneGraph sidewalks) | `get_random_location_from_navigation()` returns `None` forever |
 | 8 | [#9870](https://github.com/carla-simulator/carla/issues/9870) | **Still open / present** (installer deploys to `Content/Map/Nav/`) | The two navmesh lookups look in different places |
 | 9 | [#9869](https://github.com/carla-simulator/carla/issues/9869) | **Still open / present** (`roadnetwork_to_xodr.py` offsets junction IDs) | *OpenDRIVE parser ignores a link's elementType* ([comment](https://github.com/carla-simulator/carla/issues/9869#issuecomment-6076656971)) |
-| 10 | [#10364](https://github.com/carla-simulator/carla/issues/10364) · [PR #10370](https://github.com/carla-simulator/carla/pull/10370) | **PR open** (patched in `RayTracer.cpp`, `Tagger.cpp`, `TrafficSignHeightUtils.cpp`) | `URayTracer::CastRay` and `ProjectPoint` dereference null `Hit.GetComponent()` on non-UObject physics bodies (`FastGeoStreaming`) |
-| 11 | [#10365](https://github.com/carla-simulator/carla/issues/10365) · [PR #10371](https://github.com/carla-simulator/carla/pull/10371) | **PR open** (patched in `RayCastSemanticLidar.cpp`, `HSSLidar.cpp`, `Radar.cpp`, `CarlaTraceChannels.h`) | Attached ray-cast sensors do not ignore their parent actor and hardcode `ECC_GameTraceChannel2` |
-| 12 | [#10366](https://github.com/carla-simulator/carla/issues/10366) · [PR #10369](https://github.com/carla-simulator/carla/pull/10369) | **PR open** (patched in `ALSM.cpp`) | Traffic Manager `ALSM::UpdateUnregisteredActorsData` processes `Dormant` actors, lacks exception guard, and snaps sidewalk walkers onto lanes |
-| 13 | [#10367](https://github.com/carla-simulator/carla/issues/10367) · [PR #10368](https://github.com/carla-simulator/carla/pull/10368) | **PR open** (patched in `LibCarla/source/carla/road/Map.cpp`) | `Map::GetAllCrosswalkZones` applies `<laneOffset>` to `<object>` coordinates and rotates lateral offset `t` by `hdg` |
+| 10 | [#10364](https://github.com/carla-simulator/carla/issues/10364) | **Open** (patched in `RayTracer.cpp`, `Tagger.cpp`, `TrafficSignHeightUtils.cpp`; initial PR [#10370](https://github.com/carla-simulator/carla/pull/10370)) | `URayTracer::CastRay` and `ProjectPoint` dereference null `Hit.GetComponent()` on non-UObject physics bodies (`FastGeoStreaming`) |
+| 11 | [#10365](https://github.com/carla-simulator/carla/issues/10365) | **Open** (patched in `RayCastSemanticLidar.cpp`, `HSSLidar.cpp`, `Radar.cpp`, `CarlaTraceChannels.h`; initial PR [#10371](https://github.com/carla-simulator/carla/pull/10371)) | Attached ray-cast sensors do not ignore their parent actor and hardcode `ECC_GameTraceChannel2` |
+| 12 | [#10366](https://github.com/carla-simulator/carla/issues/10366) | **Open** (patched in `ALSM.cpp`; initial PR [#10369](https://github.com/carla-simulator/carla/pull/10369)) | Traffic Manager `ALSM::UpdateUnregisteredActorsData` processes `Dormant` actors, lacks exception guard, and snaps sidewalk walkers onto lanes |
+| 13 | [#10367](https://github.com/carla-simulator/carla/issues/10367) | **Open** (patched in `LibCarla/source/carla/road/Map.cpp`; initial PR [#10368](https://github.com/carla-simulator/carla/pull/10368)) | `Map::GetAllCrosswalkZones` applies `<laneOffset>` to `<object>` coordinates and rotates lateral offset `t` by `hdg` |
 
 Background: [#9852](https://github.com/carla-simulator/carla/issues/9852).
 
