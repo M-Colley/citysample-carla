@@ -73,22 +73,32 @@ foreach ($cfg in $configs) {
     Write-Host "    engine : $EnginePath"
     Write-Host "    log    : $log"
 
+    # Invoke Build.bat directly rather than Start-Process -Wait -RedirectStandardOutput:
+    # UE 5.8's UnrealBuildAccelerator (UbaServer.exe) inherits redirected handles and
+    # lingers ~10 min after compilation succeeds, stalling Start-Process -Wait.
     $sw = [Diagnostics.Stopwatch]::StartNew()
-    $p = Start-Process -FilePath $buildBat `
-        -ArgumentList @("CitySampleEditor", "Win64", $cfg, "-Project=`"$uproject`"", "-WaitMutex", "-FromMsBuild") `
-        -WorkingDirectory $EnginePath `
-        -RedirectStandardOutput $log -RedirectStandardError "$log.err" `
-        -NoNewWindow -Wait -PassThru
+    $prevEap = $ErrorActionPreference
+    $ErrorActionPreference = "Continue"
+    $exitCode = 1
+    Push-Location $EnginePath
+    try {
+        & $buildBat "CitySampleEditor" "Win64" $cfg "-Project=$uproject" "-WaitMutex" "-FromMsBuild" 2>&1 |
+            Tee-Object -FilePath $log
+        $exitCode = $LASTEXITCODE
+    } finally {
+        Pop-Location
+        $ErrorActionPreference = $prevEap
+    }
     $sw.Stop()
 
     $text = if (Test-Path $log) { Get-Content $log -Raw } else { "" }
     $ice  = ([regex]::Matches($text, "error C1001")).Count
     $errs = ([regex]::Matches($text, "error [A-Z]+\d+")).Count
 
-    Write-Host ("    exit {0}, {1:N1} min, {2} errors ({3} ICE)" -f $p.ExitCode, $sw.Elapsed.TotalMinutes, $errs, $ice) `
-        -ForegroundColor $(if ($p.ExitCode -eq 0) { "Green" } else { "Yellow" })
+    Write-Host ("    exit {0}, {1:N1} min, {2} errors ({3} ICE)" -f $exitCode, $sw.Elapsed.TotalMinutes, $errs, $ice) `
+        -ForegroundColor $(if ($exitCode -eq 0) { "Green" } else { "Yellow" })
 
-    if ($p.ExitCode -eq 0) {
+    if ($exitCode -eq 0) {
         Write-Host "`nbuild succeeded ($cfg)" -ForegroundColor Green
         Write-Host "run it with:  powershell -File tools\Run-CarlaCity.ps1 -Configuration $cfg" -ForegroundColor White
         exit 0

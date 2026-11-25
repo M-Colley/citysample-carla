@@ -24,9 +24,9 @@ import sys
 
 # --- disk requirements, from CARLA's own Docs/build_windows_ue5.md -----------
 #   "this takes more than 1 extra hour of build and a 225Gb of disk space"
-UE_BUILD_GB = 225          # CARLA's UE 5.8 fork, source build
-CARLA_BUILD_GB = 60        # CARLA itself + content + intermediates (estimate)
-CITY_SAMPLE_GB = 100       # City Sample project + derived data (estimate)
+UE_BUILD_GB = 225  # CARLA's UE 5.8 fork, source build
+CARLA_BUILD_GB = 60  # CARLA itself + content + intermediates (estimate)
+CITY_SAMPLE_GB = 100  # City Sample project + derived data (estimate)
 TOTAL_GB = UE_BUILD_GB + CARLA_BUILD_GB + CITY_SAMPLE_GB
 # Part A does not build CARLA or its engine fork.
 PART_A_GB = CITY_SAMPLE_GB
@@ -41,7 +41,9 @@ def record(status: str, name: str, detail: str = "") -> None:
 
 def run(cmd: list[str], timeout: int = 15) -> str | None:
     try:
-        out = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+        out = subprocess.run(
+            cmd, check=False, capture_output=True, text=True, timeout=timeout
+        )
     except (OSError, subprocess.SubprocessError):
         return None
     if out.returncode != 0:
@@ -50,7 +52,9 @@ def run(cmd: list[str], timeout: int = 15) -> str | None:
     return (out.stdout or out.stderr or "").strip()
 
 
-def check_tool(name: str, cmd: list[str] | None = None, required: bool = True) -> str | None:
+def check_tool(
+    name: str, cmd: list[str] | None = None, required: bool = True
+) -> str | None:
     path = shutil.which(name)
     if not path:
         record(BAD if required else WARN, name, "not on PATH")
@@ -62,39 +66,60 @@ def check_tool(name: str, cmd: list[str] | None = None, required: bool = True) -
 
 
 def check_disk(part_a: bool = False) -> None:
-    for drive in (["C:\\", "D:\\"] if platform.system() == "Windows" else ["/"]):
+    ue = (
+        os.environ.get("CARLA_UE_DIR")
+        or os.environ.get("CARLA_UNREAL_ENGINE_PATH")
+        or r"C:\carla-ue58\UnrealEngine5_carla"
+    )
+    carla_dir = os.environ.get("CARLA_DIR") or r"C:\carla-ue58\carla"
+    city_dir = os.environ.get("CITYSAMPLE_DIR") or os.path.join(
+        os.environ.get("USERPROFILE", ""), "Documents", "Unreal Projects", "CitySample"
+    )
+    already_built = os.path.isfile(os.path.join(city_dir, "CitySample.uproject")) and (
+        part_a or (os.path.isdir(ue) and os.path.isdir(carla_dir))
+    )
+
+    drives: list[tuple[str, float]] = []
+    for drive in ["C:\\", "D:\\"] if platform.system() == "Windows" else ["/"]:
         try:
-            total, used, free = shutil.disk_usage(drive)
+            _total, _used, free = shutil.disk_usage(drive)
         except OSError:
             continue
-        free_gb = free / 2**30
-        # Part A never builds the engine or CARLA - it only needs room beside an
-        # existing City Sample project - so holding it to the part B figure
-        # reports a blocker that is not one.
-        need = PART_A_GB if part_a else TOTAL_GB
-        floor = 0 if part_a else UE_BUILD_GB
-        # A build that only just fits will fail partway through: cooking and the
-        # Zen store need slack on top of the finished tree. Want 15% headroom.
+        drives.append((drive, free / 2**30))
+
+    need = PART_A_GB if part_a else TOTAL_GB
+    floor = 0 if part_a else UE_BUILD_GB
+    any_drive_fits = any(fg >= need for _, fg in drives)
+
+    for drive, free_gb in drives:
         if free_gb >= need * 1.15:
             status, note = OK, ""
         elif free_gb >= need:
             status = WARN
             note = f" -- only {free_gb - need:,.0f} GiB spare; cooking needs slack"
-        elif part_a:
+        elif already_built and free_gb >= 15:
+            status = OK
+            note = " (trees already installed; runtime slack ok)"
+        elif part_a or any_drive_fits or free_gb >= floor:
             status = WARN
-            note = " -- not enough for a City Sample project on this drive"
-        elif free_gb >= floor:
-            status = WARN
-            note = " -- enough for the engine, not for engine + CARLA + City Sample"
+            note = f" -- below ~{need} GiB fresh-build budget on this drive"
         else:
-            status, note = BAD, f" -- below the {need} GiB this needs"
-        record(status, f"disk {drive}",
-               f"{free_gb:,.0f} GiB free (need ~{need} GiB{'' if part_a else ' total'}){note}")
+            status, note = BAD, f" -- below the {need} GiB a fresh build needs"
+        record(
+            status,
+            f"disk {drive}",
+            f"{free_gb:,.0f} GiB free (fresh build ~{need} GiB){note}",
+        )
 
 
 def check_gpu() -> None:
-    out = run(["nvidia-smi", "--query-gpu=name,memory.total,driver_version",
-               "--format=csv,noheader"])
+    out = run(
+        [
+            "nvidia-smi",
+            "--query-gpu=name,memory.total,driver_version",
+            "--format=csv,noheader",
+        ]
+    )
     if not out:
         record(BAD, "nvidia-smi", "no NVIDIA GPU visible")
         return
@@ -107,8 +132,12 @@ def check_gpu() -> None:
     # City Sample at Epic quality with Nanite and Lumen is the demanding part;
     # CARLA's sensors then render additional views on top of it.
     if gb < 8:
-        record(WARN, "VRAM", f"{gb:.1f} GB - City Sample at Epic quality wants 8 GB+; "
-                             f"use -Quality Medium")
+        record(
+            WARN,
+            "VRAM",
+            f"{gb:.1f} GB - City Sample at Epic quality wants 8 GB+; "
+            f"use -Quality Medium",
+        )
     else:
         record(OK, "VRAM", f"{gb:.1f} GB")
 
@@ -120,19 +149,25 @@ def check_netfx() -> None:
         import winreg
     except ImportError:
         return
-    for path in (r"SOFTWARE\WOW6432Node\Microsoft\Microsoft SDKs\NETFXSDK",
-                 r"SOFTWARE\Microsoft\Microsoft SDKs\NETFXSDK"):
+    for path in (
+        r"SOFTWARE\WOW6432Node\Microsoft\Microsoft SDKs\NETFXSDK",
+        r"SOFTWARE\Microsoft\Microsoft SDKs\NETFXSDK",
+    ):
         try:
             with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, path) as key:
-                versions = [winreg.EnumKey(key, i)
-                            for i in range(winreg.QueryInfoKey(key)[0])]
+                versions = [
+                    winreg.EnumKey(key, i) for i in range(winreg.QueryInfoKey(key)[0])
+                ]
         except OSError:
             continue
         if versions:
             record(OK, ".NET Framework SDK", ", ".join(versions))
             return
-    record(BAD, ".NET Framework SDK",
-           "NETFXSDK not registered - run tools/Install-NetFxSdk.ps1")
+    record(
+        BAD,
+        ".NET Framework SDK",
+        "NETFXSDK not registered - run tools/Install-NetFxSdk.ps1",
+    )
 
 
 def check_windows(part_a: bool = False) -> None:
@@ -145,7 +180,7 @@ def check_windows(part_a: bool = False) -> None:
     if not part_a:
         check_gpu()
         check_tool("git", ["git", "--version"])
-        check_tool("cmake", ["cmake", "--version"])   # CARLA needs >= 3.27.2
+        check_tool("cmake", ["cmake", "--version"])  # CARLA needs >= 3.27.2
         check_tool("ninja", ["ninja", "--version"])
     check_tool("python", ["python", "--version"])
     check_netfx()
@@ -153,15 +188,31 @@ def check_windows(part_a: bool = False) -> None:
     # Visual Studio 2022 with the C++ toolset.
     vswhere = os.path.join(
         os.environ.get("ProgramFiles(x86)", r"C:\Program Files (x86)"),
-        "Microsoft Visual Studio", "Installer", "vswhere.exe",
+        "Microsoft Visual Studio",
+        "Installer",
+        "vswhere.exe",
     )
     if not os.path.exists(vswhere):
         record(BAD, "Visual Studio 2022", "vswhere.exe not found")
     else:
+
         def find(*version):
-            return run([vswhere, "-latest", *version, "-products", "*", "-requires",
-                        "Microsoft.VisualStudio.Component.VC.Tools.x86.x64",
-                        "-format", "value", "-property", "displayName"])
+            return run(
+                [
+                    vswhere,
+                    "-latest",
+                    *version,
+                    "-products",
+                    "*",
+                    "-requires",
+                    "Microsoft.VisualStudio.Component.VC.Tools.x86.x64",
+                    "-format",
+                    "value",
+                    "-property",
+                    "displayName",
+                ]
+            )
+
         # Ask for 2022 by version. "-latest" alone happily returns VS 2026 (18.x),
         # which this check then reported as the 2022 toolset the build needs -
         # and SetupWithBuildTools.bat looks for the 2022 Build Tools by path.
@@ -170,33 +221,70 @@ def check_windows(part_a: bool = False) -> None:
         if vs2022:
             record(OK, "Visual Studio 2022 C++ toolset", vs2022)
         elif other:
-            record(WARN, "Visual Studio 2022 C++ toolset",
-                   f"only {other} - UE 5.8 and SetupWithBuildTools.bat expect 2022")
+            record(
+                WARN,
+                "Visual Studio 2022 C++ toolset",
+                f"only {other} - UE 5.8 and SetupWithBuildTools.bat expect 2022",
+            )
         else:
-            record(BAD, "Visual Studio 2022 C++ toolset",
-                   "no Visual Studio with the C++ x64 toolset component")
+            record(
+                BAD,
+                "Visual Studio 2022 C++ toolset",
+                "no Visual Studio with the C++ x64 toolset component",
+            )
 
     # The CARLA UE fork is gated: you must link GitHub <-> Epic Games.
     ue = os.environ.get("CARLA_UE_DIR") or os.environ.get("CARLA_UNREAL_ENGINE_PATH")
     if part_a:
-        pass                                # part A uses the launcher's UE 5.8
+        pass  # part A uses the launcher's UE 5.8
     elif ue and os.path.isdir(ue):
-        record(OK, "CARLA_UNREAL_ENGINE_PATH", ue)
+        record(OK, "CARLA_UE_DIR", ue)
     else:
         record(
-            WARN, "CARLA_UNREAL_ENGINE_PATH",
-            "unset. CarlaSetup.bat will clone + build CarlaUnreal/UnrealEngine "
-            "(branch ue58-dev-carla): ~225 GB and >1 h. Requires a GitHub account "
+            WARN,
+            "CARLA_UE_DIR",
+            "unset. Point CARLA_UE_DIR at your built CarlaUnreal/UnrealEngine "
+            "(CARLA 1.0 tag, ~225 GB and >1 h). Requires a GitHub account "
             "linked to Epic Games - https://www.unrealengine.com/en-US/ue-on-github",
+        )
+
+    carla_dir = os.environ.get("CARLA_DIR")
+    if not part_a:
+        if carla_dir and os.path.isdir(carla_dir):
+            record(OK, "CARLA_DIR", carla_dir)
+        else:
+            record(
+                WARN,
+                "CARLA_DIR",
+                "unset (defaults to C:\\carla-ue58\\carla in PowerShell scripts; "
+                "use CARLA tag 1.0 / 3ea166118d2c)",
+            )
+
+    city_dir = os.environ.get("CITYSAMPLE_DIR") or os.path.join(
+        os.environ.get("USERPROFILE", ""), "Documents", "Unreal Projects", "CitySample"
+    )
+    if city_dir and os.path.isfile(os.path.join(city_dir, "CitySample.uproject")):
+        record(OK, "CitySample project", city_dir)
+    else:
+        record(
+            WARN,
+            "CitySample project",
+            "CitySample.uproject not found at default path; set CITYSAMPLE_DIR",
         )
 
     # The Python client the tools use.
     try:
         import carla
-        record(OK, "carla python module", carla.Client("127.0.0.1", 2000).get_client_version())
+
+        record(
+            OK,
+            "carla python module",
+            carla.Client("127.0.0.1", 2000).get_client_version(),
+        )
     except ImportError:
         record(
-            WARN, "carla python module",
+            WARN,
+            "carla python module",
             "not importable. Use the wheel matching the server. The source build "
             "writes it to Build/PythonAPI/dist.",
         )
@@ -204,19 +292,27 @@ def check_windows(part_a: bool = False) -> None:
 
 def main() -> int:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--part-a", action="store_true",
-                    help="only check what part A needs (road-network export)")
+    ap.add_argument(
+        "--part-a",
+        action="store_true",
+        help="only check what part A needs (road-network export)",
+    )
     args = ap.parse_args()
 
     scope = "  [part A only]" if args.part_a else ""
     print()
     print("  doctor - Epic City Sample as a CARLA (UE 5.8) server" + scope)
-    print(f"  {platform.system()} {platform.release()}  python {platform.python_version()}\n")
+    print(
+        f"  {platform.system()} {platform.release()}  python {platform.python_version()}\n"
+    )
 
     if platform.system() != "Windows":
-        record(WARN, "platform",
-               f"{platform.system()} - this pipeline is Windows-only "
-               f"(UE build scripts, PowerShell tooling)")
+        record(
+            WARN,
+            "platform",
+            f"{platform.system()} - this pipeline is Windows-only "
+            f"(UE build scripts, PowerShell tooling)",
+        )
     check_windows(part_a=args.part_a)
 
     width = max(len(n) for _, n, _ in _results) + 2

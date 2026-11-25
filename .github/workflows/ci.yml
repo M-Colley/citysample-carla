@@ -30,6 +30,19 @@ jobs:
       - name: Byte-compile all Python tools
         run: python -m py_compile tools/*.py
 
+      - name: Parse-check all PowerShell scripts
+        shell: pwsh
+        run: |
+          $errs = $null
+          foreach ($f in Get-ChildItem tools/*.ps1) {
+            $tokens = $null; $parseErrs = $null
+            [void][System.Management.Automation.Language.Parser]::ParseFile($f.FullName, [ref]$tokens, [ref]$parseErrs)
+            if ($parseErrs.Count -gt 0) {
+              Write-Error "$($f.Name): $($parseErrs | Out-String)"
+              exit 1
+            }
+          }
+
   patch-check:
     name: Verify CARLA 1.0 patch applies cleanly
     runs-on: ubuntu-latest

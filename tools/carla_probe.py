@@ -18,7 +18,6 @@ import argparse
 import os
 import queue
 import sys
-import time
 
 try:
     import carla
@@ -39,7 +38,7 @@ def spawn_camera(world, transform, width, height, fov=90.0):
     bp.set_attribute("image_size_y", str(height))
     bp.set_attribute("fov", str(fov))
     cam = world.spawn_actor(bp, transform)
-    frames: "queue.Queue" = queue.Queue()
+    frames: queue.Queue = queue.Queue()
     cam.listen(frames.put)
     return cam, frames
 
@@ -58,11 +57,14 @@ def drive_traffic(world, client, count):
 
     tm = client.get_trafficmanager(8000)
     tm.set_synchronous_mode(True)
-    tm.set_osm_mode(True)      # despawn at map-edge dead ends rather than error
+    tm.set_osm_mode(True)  # despawn at map-edge dead ends rather than error
 
-    bps = [b for b in world.get_blueprint_library().filter("vehicle.*")
-           if b.has_attribute("number_of_wheels")
-           and int(b.get_attribute("number_of_wheels")) == 4]
+    bps = [
+        b
+        for b in world.get_blueprint_library().filter("vehicle.*")
+        if b.has_attribute("number_of_wheels")
+        and int(b.get_attribute("number_of_wheels")) == 4
+    ]
 
     cars = []
     for sp in spawns[:count]:
@@ -70,7 +72,7 @@ def drive_traffic(world, client, count):
         if v:
             v.set_autopilot(True, tm.get_port())
             cars.append(v)
-    print(f"\n=== traffic ===")
+    print("\n=== traffic ===")
     print(f"  spawned {len(cars)}/{count}")
 
     # Settle first: a vehicle dropped at a spawn point is still falling for the
@@ -84,7 +86,7 @@ def drive_traffic(world, client, count):
         try:
             if v.is_alive:
                 vel = v.get_velocity()
-                speeds.append(3.6 * (vel.x ** 2 + vel.y ** 2 + vel.z ** 2) ** 0.5)
+                speeds.append(3.6 * (vel.x**2 + vel.y**2 + vel.z**2) ** 0.5)
         except RuntimeError:
             pass
 
@@ -92,8 +94,10 @@ def drive_traffic(world, client, count):
     if speeds:
         ordered = sorted(speeds)
         print(f"  alive {len(speeds)}/{len(cars)}, moving {len(moving)}")
-        print(f"  km/h: min {ordered[0]:.0f}, "
-              f"median {ordered[len(ordered) // 2]:.0f}, max {ordered[-1]:.0f}")
+        print(
+            f"  km/h: min {ordered[0]:.0f}, "
+            f"median {ordered[len(ordered) // 2]:.0f}, max {ordered[-1]:.0f}"
+        )
     else:
         print("  no vehicles survived")
 
@@ -111,8 +115,7 @@ def drive_traffic(world, client, count):
     world.tick()
 
     tm.set_synchronous_mode(False)
-    client.apply_batch_sync(
-        [carla.command.DestroyActor(v) for v in cars], True)
+    client.apply_batch_sync([carla.command.DestroyActor(v) for v in cars], True)
     return len(moving), len(speeds)
 
 
@@ -121,14 +124,23 @@ def main() -> int:
     ap.add_argument("--host", default="127.0.0.1")
     ap.add_argument("--port", type=int, default=2000)
     ap.add_argument("--timeout", type=float, default=120.0)
-    ap.add_argument("--shots", type=int, default=4, help="camera positions to photograph")
+    ap.add_argument(
+        "--shots", type=int, default=4, help="camera positions to photograph"
+    )
     ap.add_argument("--out", default="shots", help="directory for the PNGs")
     ap.add_argument("--width", type=int, default=1280)
     ap.add_argument("--height", type=int, default=720)
-    ap.add_argument("--carla-sun", action="store_true",
-                    help="keep CARLA's own sun on (blows out a level that already has lighting)")
-    ap.add_argument("--traffic", type=int, default=0,
-                    help="spawn N autopilot vehicles and report whether they drive")
+    ap.add_argument(
+        "--carla-sun",
+        action="store_true",
+        help="keep CARLA's own sun on (blows out a level that already has lighting)",
+    )
+    ap.add_argument(
+        "--traffic",
+        type=int,
+        default=0,
+        help="spawn N autopilot vehicles and report whether they drive",
+    )
     args = ap.parse_args()
 
     client = carla.Client(args.host, args.port)
@@ -142,13 +154,10 @@ def main() -> int:
     cmap = world.get_map()
     print(f"  map    {cmap.name}")
 
-    # CARLA drives its own directional light through the weather system. On its
-    # own towns that IS the lighting. The City Sample already ships a complete
-    # lighting setup, so leaving CARLA's sun on gives the level two suns: the
-    # engine warns "Multiple directional lights are competing to be the single
-    # one used for forward shading" and every lit surface blows out to white.
-    # Putting CARLA's sun below the horizon hands the level back to its own
-    # lighting, which is what you actually want when hosting City Sample.
+    # CARLA drives its own directional light through the weather system. Patched
+    # v1.2.0+ servers automatically suppress BP_Carla_Sky when the level already
+    # ships an external directional sun; keeping sun_altitude_angle = -90.0 here
+    # remains a harmless fallback when probing an older or unpatched server.
     if not args.carla_sun:
         weather = world.get_weather()
         weather.sun_altitude_angle = -90.0
@@ -165,7 +174,6 @@ def main() -> int:
     settings.fixed_delta_seconds = 0.05
     world.apply_settings(settings)
     try:
-
         actors = world.get_actors()
         print("\n=== world ===")
         print(f"  actors        : {len(actors):,}")
@@ -183,35 +191,49 @@ def main() -> int:
         # path reaches a dead end. An .xodr whose junction ids were also road
         # ids reports 0 here and every junction approach is a dead end.
         entries = sum(1 for a, b in topo if not a.is_junction and b.is_junction)
-        print(f"  junction entries: {entries:,}"
-              f"{'   <-- NONE: regenerate the .xodr (README section 11)' if not entries else ''}")
+        print(
+            f"  junction entries: {entries:,}"
+            f"{'   <-- NONE: regenerate the .xodr (README section 2)' if not entries else ''}"
+        )
         if spawns:
             from carla_validate_xodr import route_reach
+
             reach = sorted(route_reach(cmap, spawns))
-            print(f"  route reach   : {sum(d >= 500.0 for d in reach)}/{len(reach)} random "
-                  f"drives went 500 m (median {reach[len(reach) // 2]:.0f} m)")
+            print(
+                f"  route reach   : {sum(d >= 500.0 for d in reach)}/{len(reach)} random "
+                f"drives went 500 m (median {reach[len(reach) // 2]:.0f} m)"
+            )
 
         # The extent of the drivable area is the cheapest signal that we are on the
         # City Sample and not on a stock CARLA town: Small City spans ~2 km.
         if spawns:
             xs = [s.location.x for s in spawns]
             ys = [s.location.y for s in spawns]
-            print(f"  extent        : {max(xs)-min(xs):,.0f} x {max(ys)-min(ys):,.0f} m")
+            print(
+                f"  extent        : {max(xs) - min(xs):,.0f} x {max(ys) - min(ys):,.0f} m"
+            )
 
         os.makedirs(args.out, exist_ok=True)
         saved = []
 
         # Photograph from a few spawn points, raised and tilted down, so buildings
         # and props are in frame rather than just tarmac.
-        picks = spawns[:: max(1, len(spawns) // max(1, args.shots))][: args.shots] if spawns else []
+        picks = (
+            spawns[:: max(1, len(spawns) // max(1, args.shots))][: args.shots]
+            if spawns
+            else []
+        )
         if not picks:
-            picks = [carla.Transform(carla.Location(0, 0, 60), carla.Rotation(pitch=-30))]
+            picks = [
+                carla.Transform(carla.Location(0, 0, 60), carla.Rotation(pitch=-30))
+            ]
 
         print("\n=== capturing ===")
         for i, sp in enumerate(picks):
             tf = carla.Transform(
                 carla.Location(sp.location.x, sp.location.y, sp.location.z + 12.0),
-                carla.Rotation(pitch=-18.0, yaw=sp.rotation.yaw))
+                carla.Rotation(pitch=-18.0, yaw=sp.rotation.yaw),
+            )
             cam, frames = spawn_camera(world, tf, args.width, args.height)
             try:
                 # Let exposure, streaming and Lumen settle, or the first frames come

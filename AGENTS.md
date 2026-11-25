@@ -6,8 +6,8 @@ mistakes below were made and paid for. Read this before editing anything.
 ## What this repository is
 
 Tooling that runs Epic's **City Sample** (Unreal Engine 5.8) as a **CARLA
-0.10.0** server, and extracts its road network as ASAM OpenDRIVE. It contains
-no Epic content and no data derived from it — see [LICENSE](LICENSE).
+1.0** server, and extracts its road network as multi-lane ASAM OpenDRIVE. It
+contains no Epic content and no data derived from it; see [LICENSE](LICENSE).
 
 The three trees you will touch:
 
@@ -30,8 +30,8 @@ bug in the code being edited.
 
 | to change | edit here | then |
 |---|---|---|
-| Mass bridge, FastGeo tagger | `plugins/CarlaMassBridge/` | re-integrate, **rebuild** |
-| anything in CARLA's `Carla` plugin | your CARLA checkout, then regenerate `patches/` | re-integrate, **rebuild** |
+| traffic-light sync, Mass bridge, FastGeo tagger | `plugins/CarlaMassBridge/` | re-integrate, **rebuild** |
+| anything in CARLA's `Carla` plugin or `LibCarla` | your CARLA checkout, then regenerate `patches/carla-1.0-citysample.patch` | re-integrate, **rebuild** |
 | a Python tool | `tools/` | nothing, it runs from here |
 | a PowerShell script | `tools/` | nothing |
 
@@ -41,9 +41,9 @@ copy. Do not ignore that warning.
 ## The loop
 
 ```bash
-powershell -File tools\Integrate-CarlaIntoCitySample.ps1   # copies + patches
-powershell -File tools\Build-CarlaCity.ps1                 # ~15 min for C++
-powershell -File tools\Run-CarlaCity.ps1 -ExecCmds "carla.FastGeoTagger.Enable 1","carla.MassBridge.Enable 1"
+powershell -File tools\Integrate-CarlaIntoCitySample.ps1   # copies + patches (upgrades older patches cleanly)
+powershell -File tools\Build-CarlaCity.ps1                 # ~45 s for CarlaMassBridge, ~15 min for full Carla
+powershell -File tools\Run-CarlaCity.ps1 -ExecCmds "carla.MassBridge.Enable 1"
 ```
 
 Three things about this loop:
@@ -65,26 +65,27 @@ Never claim something works without running the tool that measures it. Each of
 these prints numbers, not a green tick:
 
 ```bash
-python tools/verify_sensors.py            # lidar, radar, raytracer, segmentation
-python tools/carla_walkers.py             # navmesh, spawning, actual movement
-python tools/carla_traffic_lights.py --watch 30
-python tools/carla_mass_bridge.py         # Epic's traffic and crowd
-python tools/segmentation_census.py --settle 25   # RUN IT TWICE, see below
-python tools/carla_probe.py               # what the server is actually serving
+python tools/verify_sensors.py                           # lidar, radar, raytracer, segmentation
+python tools/carla_walkers.py --walkers 30               # navmesh, spawning, actual movement
+python tools/carla_traffic_lights.py --watch 32 --verify-sync
+python tools/carla_mass_bridge.py --test-yielding        # Epic's traffic/crowd + two-way braking
+python tools/segmentation_census.py --settle 25          # RUN IT TWICE, see below
+python tools/carla_probe.py                              # what the server is actually serving
 ```
 
 Every Python converter has `--selftest` and needs no server.
 
 **Measurements that lie if you take them once:**
 
-- **`segmentation_census.py`** — the first run after a server start is
-  meaningless and the tool says so. World Partition is still streaming, and
-  untagged geometry renders with whatever City Sample left in its custom
-  primitive data, which the shader reads as a nonsense label. Run it twice.
-- **`carla_traffic_lights.py --watch`** — a window under ~25 s can sit inside
+- **`segmentation_census.py`**: World Partition cells around `hero` take ~20-25 s
+  to finish streaming on cold boot (`Unlabeled` starts high on `Big_City_LVL` and
+  settles at `0.0 %-0.4 %` once cells register, with `0.00 %` `R > 29` from Run 1).
+  Run it twice.
+- **`carla_traffic_lights.py --watch`**: a window under ~25 s can sit inside
   one phase and report "static" for lights that are cycling.
-- **Anything spatial** — the Mass bridge mirrors the entities nearest the
-  *spectator*. Park the spectator before counting.
+- **Anything spatial**: the Mass bridge mirrors the entities nearest
+  `role_name="hero"` (falling back to the spectator). Keep `hero` or the spectator
+  parked in a streamed district before counting.
 - **Walkers that move** — `carla_walkers.py` passes when walkers walk, and a
   walker on an island walks. Whether pedestrians can reach the rest of the city
   is `xodr_to_recast_obj.py`'s `walkable : N island(s)` line; sidewalks that
@@ -103,13 +104,12 @@ are in the code comments too; this is the index.
   runs the whole string as one command, sets the first CVar from a garbage
   argument that `atoi`s to 1, and silently drops the rest. Symptom: one feature
   works, the other is absent, nothing logged.
-- **Never cache "already done" against a pointer.** World Partition unloads and
-  reloads containers, and the allocator reuses addresses. A `TSet` of tagged
-  component pointers reports new, untagged geometry as finished. One viewpoint
-  measured between 0 % and 92 % unlabeled depending on how streaming had cycled.
-  The FastGeo sweep keeps no tagging state; leave it that way. (Its mesh-to-label
-  memo is not this: it remembers what a mesh asset's label IS, keyed on
-  `FObjectKey` - index plus serial number, which a reused address cannot match.)
+- **Never cache "already done" against a raw pointer.** World Partition unloads
+  and reloads containers, and the allocator reuses addresses. A `TSet` of raw
+  component or container pointers reports new, untagged geometry as finished.
+  `CarlaFastGeoTagger` only caches registered containers and static mesh labels
+  by `FObjectKey` (`ObjectIndex + SerialNumber`), which a reused address cannot
+  match.
 - **`MarkRenderStateDirty(true)` on a FastGeo component crashes the server.** It
   queues a component whose `ProxyState` is `Creating` for recreation and trips an
   assertion. It is also unnecessary. Do not "fix" its absence.
@@ -140,10 +140,11 @@ are in the code comments too; this is the index.
    Epic's content once derived. `.gitignore` covers them; check `git status`
    before committing anyway. The one deliberate exception is
    `docs/citysample-carla.{mp4,gif}`, which the owner chose to include.
-2. **Regenerate `patches/carla-ue58-plugin-build-fixes.patch` with
-   `git diff HEAD`** from the CARLA checkout, and verify with
-   `git apply --reverse --check`. It must stay byte-exact — `.gitattributes`
-   marks it `-text` so git never rewrites its line endings.
+2. **Regenerate `patches/carla-1.0-citysample.patch` with
+   `git diff HEAD --output=...`** from the CARLA `1.0` (`3ea166118d2c`) checkout
+   (never use PowerShell `>` redirection, which writes UTF-16LE BOM), and verify
+   with `git apply --reverse --check`. `.gitattributes` marks `*.patch` `-text`
+   so git never rewrites its line endings.
 3. **Keep the vendored plugin in sync.** After editing
    `plugins/CarlaMassBridge/`, the project copy is downstream. `diff -r` them if
    a change seems not to take effect.
@@ -155,14 +156,14 @@ are in the code comments too; this is the index.
 ## Where things are
 
 ```
-tools/            Python converters and CARLA client checks; PowerShell drivers
-plugins/CarlaMassBridge/   the Mass->CARLA bridge and the FastGeo semantic tagger
-CityRoadExport/   UE plugin, -run=ExportZoneGraph
-patches/          19 files of CARLA fixes, applied to your CARLA checkout
-config/           [CarlaTagger] label rules, appended to the project's DefaultGame.ini
-docs/             the implementation plan and the showcase video
-ISSUES-TO-FILE.md nine CARLA issues, eight filed upstream (#9869 corrected)
+tools/                     Python converters and CARLA client checks; PowerShell drivers
+plugins/CarlaMassBridge/   traffic-light sync, Mass->CARLA bridge, and FastGeo semantic tagger
+CityRoadExport/            UE plugin, -run=ExportZoneGraph
+patches/                   CARLA 1.0 patch (carla-1.0-citysample.patch) + legacy 0.10 patch
+config/                    [CarlaTagger] label rules, appended to the project's DefaultGame.ini
+docs/                      KNOWN-LIMITATIONS.md, IMPLEMENTATION-PLAN.md, showcase videos
+ISSUES-TO-FILE.md          13 CARLA issues, 12 filed upstream (#9869 corrected)
 ```
 
-Read `README.md` §10 for what is known-broken before assuming you found
-something new.
+Read `README.md` §8 and `docs/KNOWN-LIMITATIONS.md` for remaining caveats before
+assuming you found something new.

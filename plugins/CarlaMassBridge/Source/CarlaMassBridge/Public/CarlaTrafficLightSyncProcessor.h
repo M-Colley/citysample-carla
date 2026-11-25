@@ -88,6 +88,8 @@ private:
         FMassEntityHandle IntersectionEntity;
         int32 TrafficLightIndex = INDEX_NONE;
         TArray<FZoneGraphTrafficLaneData *> ControlledLanes;
+        double YellowStartedWorldTime = -100.0;
+        double HoldYellowUntilWorldTime = -1.0;
     };
 
     void RebuildBindingsIfNeeded(UWorld *World,

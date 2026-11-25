@@ -21,7 +21,7 @@ You can stop after Part A if you only need the road network, or continue through
 | **[Part A — Road network](#2-part-a--extract-the-road-network)** | `Small_City_LVL` and `Big_City_LVL` exported as ASAM **OpenDRIVE** (`.xodr`) with signals, signs, speed limits, and crosswalks. Runs in any CARLA (`generate_opendrive_world`). | Stock UE 5.8 + City Sample + Python 3.10+ |
 | **[Part B — Full city server](#3-part-b--run-city-sample-as-a-carla-10-server)** | CARLA 1.0 serving the City Sample levels directly — Nanite/Lumen buildings, props, Mass traffic & crowd, pedestrian navmeshes, and full sensor suite. | Also needs CARLA 1.0 + CARLA's UE 5.8 fork built from source (~385 GB disk, 64 GB RAM) |
 
-### Supported Maps (CARLA 1.0, `v1.2.0`)
+### Supported Maps (CARLA 1.0, `v1.2.1`)
 
 | Map | Footprint | Roads & Junctions | Signals & Curbside Signs | Pedestrian NavMesh |
 |---|---|---|---|---|
@@ -226,7 +226,7 @@ python %CARLA_DIR%/PythonAPI/examples/nvidia/nurec/nurec_runner.py --port 2000 -
 
 ---
 
-## 5. Measured Validation (`v1.2.0` on CARLA 1.0)
+## 5. Measured Validation (`v1.2.1` on CARLA 1.0)
 
 All figures below were measured on the live CARLA `1.0` server (`3ea166118d2c` / UE 5.8 `b76fce0e3bcb`) with default `SyncTrafficLights=1`, default `FastGeoTagger=1`, default native-sun lighting, and `MassBridge` enabled:
 

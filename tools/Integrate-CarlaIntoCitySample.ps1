@@ -287,6 +287,17 @@ if ($isRelease) {
 }
 
 $skipCreated = @()
+$resetForUpgrade = $false
+$patchText = Get-Content -LiteralPath $patch -Raw
+$patchTargetSet = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+foreach ($pFile in @(Get-ChildItem -LiteralPath (Join-Path $PSScriptRoot "..\patches") -Filter "*.patch" -File -ErrorAction SilentlyContinue)) {
+    $txt = Get-Content -LiteralPath $pFile.FullName -Raw
+    foreach ($m in [regex]::Matches($txt, '(?m)^\+\+\+ b/([^\r\n]+)')) {
+        $null = $patchTargetSet.Add($m.Groups[1].Value)
+    }
+}
+$createdByPatch = @([regex]::Matches($patchText, '(?m)^--- /dev/null\r?\n\+\+\+ b/([^\r\n]+)') | ForEach-Object { $_.Groups[1].Value })
+
 $eap = $ErrorActionPreference
 $ErrorActionPreference = 'Continue'
 try {
@@ -295,22 +306,34 @@ try {
     if (-not $patchApplied) {
         # Git reset leaves patch-created files untracked. Skip a creation
         # hunk only when Git confirms the file matches the patch.
-        $creates = [regex]::Matches((Get-Content -LiteralPath $patch -Raw), '(?m)^--- /dev/null\r?\n\+\+\+ b/([^\r\n]+)')
-        foreach ($creation in $creates) {
-            $rel = $creation.Groups[1].Value
+        foreach ($rel in $createdByPatch) {
             if (-not (Test-Path -LiteralPath (Join-Path $CarlaRoot $rel) -PathType Leaf)) { continue }
             & git -C $CarlaRoot apply --reverse --check "--include=$rel" $patch 2>$null
             if ($LASTEXITCODE -eq 0) { $skipCreated += "--exclude=$rel" }
         }
-        & git -C $CarlaRoot apply --check @skipCreated $patch
+        & git -C $CarlaRoot apply --check @skipCreated $patch 2>$null
         if ($LASTEXITCODE -ne 0) {
-            throw "Cannot apply $patchName at $sourceHead. Use CARLA tag 1.0 or the legacy revision de3f38e64."
+            # Check if $CarlaRoot simply has an earlier version of our City Sample
+            # patch applied (e.g. upgrading from v1.1.x to v1.2.x): every dirty or
+            # untracked file under $CarlaRoot is owned by patches/*.patch.
+            $dirtyTracked = @(& git -C $CarlaRoot diff --name-only HEAD 2>$null | Where-Object { $_ })
+            $untracked = @(& git -C $CarlaRoot ls-files --others --exclude-standard 2>$null | Where-Object { $_ })
+            $foreignDirty = @($dirtyTracked | Where-Object { -not $patchTargetSet.Contains($_) })
+            $foreignUntracked = @($untracked | Where-Object { -not $patchTargetSet.Contains($_) })
+            if (($dirtyTracked.Count + $untracked.Count) -gt 0 -and $foreignDirty.Count -eq 0 -and $foreignUntracked.Count -eq 0) {
+                $resetForUpgrade = $true
+            } else {
+                & git -C $CarlaRoot apply --check @skipCreated $patch
+                throw "Cannot apply $patchName at $sourceHead. Use CARLA tag 1.0 or the legacy revision de3f38e64."
+            }
         }
     }
 } finally {
     $ErrorActionPreference = $eap
 }
-if ($patchApplied) { Ok "CARLA patch already applied" } else { Ok "CARLA patch applies cleanly" }
+if ($patchApplied) { Ok "CARLA patch already applied" }
+elseif ($resetForUpgrade) { Ok "CARLA patch upgrade ready (replacing earlier City Sample patch hunks)" }
+else { Ok "CARLA patch applies cleanly" }
 
 $mapSpecs = @(
     @{
@@ -395,9 +418,33 @@ Ok "generated CARLA build definitions"
 
 if ($CheckOnly) { exit 0 }
 if (-not $patchApplied) {
+    if ($resetForUpgrade) {
+        $prevEap = $ErrorActionPreference
+        $ErrorActionPreference = 'Continue'
+        try {
+            & git -C $CarlaRoot reset --quiet HEAD 2>$null
+            $dirtyNow = @(& git -C $CarlaRoot diff --name-only 2>$null | Where-Object { $_ })
+            if ($dirtyNow.Count -gt 0) {
+                & git -C $CarlaRoot checkout -- @dirtyNow
+                if ($LASTEXITCODE -ne 0) { throw "failed to reset previous patch files in $CarlaRoot" }
+            }
+            foreach ($rel in $patchTargetSet) {
+                & git -C $CarlaRoot cat-file -e "HEAD:$rel" 2>$null
+                if ($LASTEXITCODE -ne 0) {
+                    $fullCreated = Join-Path $CarlaRoot $rel
+                    if (Test-Path -LiteralPath $fullCreated -PathType Leaf) {
+                        Remove-Item -LiteralPath $fullCreated -Force
+                    }
+                }
+            }
+            $skipCreated = @()
+        } finally {
+            $ErrorActionPreference = $prevEap
+        }
+    }
     & git -C $CarlaRoot apply @skipCreated $patch
     if ($LASTEXITCODE -ne 0) { throw "git apply failed after its own check passed: $patchName" }
-    Ok "applied $patchName"
+    Ok $(if ($resetForUpgrade) { "upgraded $patchName" } else { "applied $patchName" })
 }
 
 # ---------------------------------------------------------------------------
@@ -715,7 +762,7 @@ foreach ($ms in $mapSpecs) {
         if ($resolvedSrc -ne $ms.DeployedXodr) { Copy-Item -LiteralPath $resolvedSrc -Destination $ms.DeployedXodr -Force }
         Ok "Saved\OpenDrive\$($ms.MapName).xodr  ($(Split-Path $resolvedSrc -Leaf), $($ms.SignalCount) signals)"
         if ($ms.SignalCount -eq 0) {
-            Note "no traffic lights in $($ms.MapName).xodr - see README part B step 8 to add them"
+            Note "no traffic lights in $($ms.MapName).xodr - see README Part A Step 3 to add them"
         }
     } elseif (-not (Test-Path -LiteralPath $ms.DeployedXodr -PathType Leaf)) {
         Note "$($ms.Prefix).xodr not found - run the export pipeline to enable $($ms.MapName)"
@@ -724,10 +771,9 @@ foreach ($ms in $mapSpecs) {
 
 Say "`n=== 9/10 installing the pedestrian navmesh ===" "Cyan"
 #
-# NOT Saved\Nav\. The client asks for the navmesh via get_required_files("Nav"),
-# and that RPC only searches Saved/ for generated OpenDRIVE worlds; for a map
-# that already exists it walks the map's CONTENT folder and nothing else. A .bin
-# in Saved\Nav\ is ignored without a word in any log, on either side.
+# Install to Content\Map\Nav\<MapName>.bin (patches/carla-1.0-citysample.patch
+# also teaches get_required_files("Nav") to serve Saved\Nav\<MapName>.bin, while
+# Content\Map\Nav\ works on both patched and stock LibCarla builds).
 foreach ($ms in $mapSpecs) {
     if ($ms.NavSrc) {
         $navDir = Split-Path $ms.DeployedNav -Parent
@@ -736,7 +782,7 @@ foreach ($ms in $mapSpecs) {
         if ($resolvedNav -ne $ms.DeployedNav) { Copy-Item -LiteralPath $resolvedNav -Destination $ms.DeployedNav -Force }
         Ok "Content\Map\Nav\$($ms.MapName).bin  ($('{0:N0}' -f $ms.NavBytes) bytes)"
     } elseif (-not (Test-Path -LiteralPath $ms.DeployedNav -PathType Leaf)) {
-        Note "$($ms.Prefix).bin not found - walkers on $($ms.MapName) need a Recast navmesh; see README part B step 11"
+        Note "$($ms.Prefix).bin not found - walkers on $($ms.MapName) need a Recast navmesh; see README Part B Step 3"
     }
 }
 

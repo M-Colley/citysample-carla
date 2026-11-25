@@ -1028,9 +1028,13 @@ void UCarlaTrafficLightSyncProcessor::Execute(FMassEntityManager &EntityManager,
     if (bMassDrivesCarla)
     {
         SetManagedGroupsFrozen(true);
+        const double Now = World->GetTimeSeconds();
+        constexpr double kMinYellowSeconds = 2.5;
 
-        // Copy Epic's live signal state onto every bound CARLA traffic light component.
-        for (const FSignalBinding &B : Bindings)
+        // Copy Epic's live signal state onto every bound CARLA traffic light component,
+        // guaranteeing a minimum Yellow clearance interval if a split-phase or preempted
+        // Mass period ever transitions Green -> Red directly.
+        for (FSignalBinding &B : Bindings)
         {
             UTrafficLightComponent *Comp = B.CarlaComponent.Get();
             if (!IsValid(Comp) || !EntityManager.IsEntityActive(B.IntersectionEntity))
@@ -1040,20 +1044,58 @@ void UCarlaTrafficLightSyncProcessor::Execute(FMassEntityManager &EntityManager,
             const FMassTrafficIntersectionFragment &Frag =
                 EntityManager.GetFragmentDataChecked<FMassTrafficIntersectionFragment>(B.IntersectionEntity);
 
-            ETrafficLightState TargetState = ETrafficLightState::Red;
+            ETrafficLightState RawTarget = ETrafficLightState::Red;
             if (B.TrafficLightIndex != INDEX_NONE &&
                 Frag.TrafficLights.IsValidIndex(B.TrafficLightIndex))
             {
-                TargetState = MassFlagsToCarlaState(
+                RawTarget = MassFlagsToCarlaState(
                     Frag.TrafficLights[B.TrafficLightIndex].TrafficLightStateFlags,
                     B.ControlledLanes);
             }
             else
             {
-                TargetState = MassLanesToCarlaState(B.ControlledLanes);
+                RawTarget = MassLanesToCarlaState(B.ControlledLanes);
             }
 
-            if (Comp->GetLightState() != TargetState)
+            const ETrafficLightState CurrentState = Comp->GetLightState();
+            ETrafficLightState TargetState = RawTarget;
+
+            if (RawTarget == ETrafficLightState::Green)
+            {
+                B.HoldYellowUntilWorldTime = -1.0;
+            }
+            else if (RawTarget == ETrafficLightState::Yellow)
+            {
+                if (CurrentState != ETrafficLightState::Yellow)
+                {
+                    B.YellowStartedWorldTime = Now;
+                }
+            }
+            else if (RawTarget == ETrafficLightState::Red)
+            {
+                if (CurrentState == ETrafficLightState::Green)
+                {
+                    // Never snap a live CARLA light directly from Green to Red with 0 s of Yellow.
+                    B.YellowStartedWorldTime = Now;
+                    B.HoldYellowUntilWorldTime = Now + kMinYellowSeconds;
+                    TargetState = ETrafficLightState::Yellow;
+                }
+                else if (CurrentState == ETrafficLightState::Yellow)
+                {
+                    const double ElapsedYellow = Now - B.YellowStartedWorldTime;
+                    if (B.HoldYellowUntilWorldTime > Now)
+                    {
+                        TargetState = ETrafficLightState::Yellow;
+                    }
+                    else if (ElapsedYellow >= 0.0 && ElapsedYellow < kMinYellowSeconds - 0.25)
+                    {
+                        B.HoldYellowUntilWorldTime = B.YellowStartedWorldTime + kMinYellowSeconds;
+                        TargetState = ETrafficLightState::Yellow;
+                    }
+                }
+            }
+
+            if (CurrentState != TargetState)
             {
                 Comp->SetLightState(TargetState);
             }

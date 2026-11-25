@@ -381,10 +381,8 @@ def main() -> int:
     sensors, vehicles, walkers, controllers = [], [], [], []
     tmpdir = tempfile.mkdtemp(prefix="carla-rec-")
     try:
-        # CARLA's game mode spawns its OWN directional light on top of the one
-        # City Sample already has, and two suns blow every lit surface to white.
-        # Putting CARLA's below the horizon leaves City Sample's lighting alone.
-        # See README section 11 and ISSUES-TO-FILE.md issue 5.
+        # Patched v1.2.0+ servers suppress BP_Carla_Sky automatically on pre-lit
+        # levels; --fix-sun remains a harmless fallback for older builds (ISSUES-TO-FILE.md issue 5).
         if args.fix_sun:
             w = world.get_weather()
             w.sun_altitude_angle = -90.0
