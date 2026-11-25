@@ -13,11 +13,11 @@ jobs:
     name: Converter selftests & syntax checks
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         with:
-          python-version: "3.12"
+          python-version: "3.13"
 
       - name: Run converter --selftest suites
         run: |
@@ -34,7 +34,7 @@ jobs:
     name: Verify CARLA 1.0 patch applies cleanly
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Fetch CARLA 1.0 release commit (3ea166118d2c) and check patch
         run: |
