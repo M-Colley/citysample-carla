@@ -43,6 +43,7 @@ public class CarlaMassBridge : ModuleRules
 
             // Epic's traffic simulation - the source of the entities we mirror.
             "MassTraffic",
+            "ZoneGraph",
 
             // CARLA's actor registry and semantic tagger.
             "Carla",

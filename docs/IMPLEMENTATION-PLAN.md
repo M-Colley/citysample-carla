@@ -6,8 +6,9 @@
 > | **1** Collision channels + segmentation CVar + Tagger | **done** | lidar 0 -> 232,584 points; radar 0 -> 1,980; segmentation out-of-range 8.7-100% -> 0.00% |
 > | **2** Deploy the .xodr | **done** | `Saved/OpenDrive/Small_City_LVL.xodr` |
 > | **3** Tagger table refinement | **done** | 40 rules; only 6 unmatched paths, all `/Engine/` meshes |
-> | **4** Mass entity bridge | **done** | 248 dormant proxies in `get_actors()` - 148 MassTraffic vehicles and 100 MassCrowd pedestrians, ids `0x8000....`, 142 tracking motion |
-> | **5** FastGeo tagging (beyond the plan) | **done** | every loaded FastGeo primitive tagged, 0 unmatched; unlabeled pixels 98.8% -> 0.5% |
+> | **4** Mass entity bridge | **done** | 250 dormant proxies in `get_actors()` (150 MassTraffic vehicles and 100 MassCrowd pedestrians, ids `0x8000....`), `destroy()` and recorder guards, dynamic `AMassVisualizer` ISM tagging |
+> | **5** FastGeo tagging (beyond the plan) | **done** | registered FastGeo containers tagged with `FObjectKey` memoization; settled unlabeled pixels 98.8% -> 0.0% (`Small_City_LVL`) and 0.4% (`Big_City_LVL`) |
+> | **6** Bi-directional MassTraffic <-> CARLA signal sync (beyond the plan) | **done** | `355/355` (`Small_City_LVL`) and `2,175/2,176` (`Big_City_LVL`, `619/619` groups) lights bound, `EndPhysics` phase actuation + `RetimeIntersectionPeriods` repair, `0` red-light violations |
 >
 > **One finding superseded the plan, and was then fixed.** Stage 3 assumed the
 > remaining unlabeled geometry was HLOD proxies. It was not: City Sample streams
@@ -859,4 +860,4 @@ There is **no `-ExecCmds` and no interactive console** in this deployment — `R
 
 That alone turns `world.get_actors()` returning 3 into "the traffic you can see, with correct transforms, velocities, bounding boxes and `Car` labels" — which is the entire point of the workstream — for about 40% of the full cost, and it leaves the TM integration, pedestrians, per-instance ISM tagging and the bounding-box sensor as clean, separately-schedulable follow-ons.
 
-**One thing to say plainly about the fourth workstream that the spec does not:** even fully delivered, CARLA's traffic lights and MassTraffic's traffic lights remain two independent systems reading the same authored data and showing, in general, different phases at the same intersection. Nothing in this plan reconciles them. That is a fifth problem.
+**Stage 6 follow-up (now implemented in `v1.2.0`):** `UCarlaTrafficLightActuationProcessor` (`EndPhysicsIntersectionBehavior`) and `UCarlaTrafficLightSyncProcessor` (`PostPhysics`) inside `plugins/CarlaMassBridge/` now reconcile Epic's `MassTraffic` intersection signals and CARLA's `ATrafficLightBase` / `ATrafficLightGroup` controllers by default (`carla.MassBridge.SyncTrafficLights = 1`), repairing Epic's `UMassTrafficRetimeIntersectionPeriodsFieldOperation` stale Yellow-transition flags, keeping signalised phases actuated in light traffic, extending stop-line trigger boxes for `50-90 km/h` arterials, and automatically falling back to `CARLA -> Mass` visual sync when `DisableMassTraffic 1` despawns Mass vehicles (`0` red-light violations across both `Small_City_LVL` and `Big_City_LVL`).

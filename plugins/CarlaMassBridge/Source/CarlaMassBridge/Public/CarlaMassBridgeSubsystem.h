@@ -12,6 +12,7 @@
 // IncludeOrderVersion.Latest, which this project uses.
 #include "Mass/EntityHandle.h"
 #include "MassArchetypeTypes.h"
+#include "UObject/ObjectKey.h"
 
 #include "CarlaMassBridgeSubsystem.generated.h"
 
@@ -110,6 +111,7 @@ private:
     void SyncCarlaObstaclesToMass();
     void RemoveAllObstacleEntities();
     void ApplyMassPopulationToggles();
+    void TagDynamicMassVisualizers();
 
     /// Mass entity -> CARLA actor id.
     TMap<FMassEntityHandle, uint32> EntityToActorId;
@@ -136,6 +138,10 @@ private:
     /// Cached active hero actor id for GetObserverLocation().
     mutable uint32 CachedHeroId = 0;
     mutable double LastHeroScanTime = -1.0;
+
+    /// Component counts of AMassVisualizer actors already tagged for semantic segmentation.
+    TMap<FObjectKey, int32> TaggedMassVisualizers;
+    double LastVisualizerTagTime = -10.0;
 
     /// Logged once when the bridge begins mirroring entities.
     bool bWarnedAboutTrafficManager = false;

@@ -1,3 +1,132 @@
+diff --git a/LibCarla/source/carla/nav/Navigation.cpp b/LibCarla/source/carla/nav/Navigation.cpp
+index 4720511..1a16773 100644
+--- a/LibCarla/source/carla/nav/Navigation.cpp
++++ b/LibCarla/source/carla/nav/Navigation.cpp
+@@ -1085,34 +1085,43 @@ namespace nav {
+     DEBUG_ASSERT(_nav_query != nullptr);
+ 
+     // filter
++    const bool use_default_filter = (filter == nullptr);
+     dtQueryFilter filter2;
+-    if (filter == nullptr) {
++    if (use_default_filter) {
+       filter2.setIncludeFlags(CARLA_TYPE_SIDEWALK);
+       filter2.setExcludeFlags(CARLA_TYPE_NONE);
+       filter = &filter2;
+     }
+ 
+-    // we will try up to 10 rounds, otherwise we failed to find a good location
+-    dtPolyRef random_ref { 0 };
+-    float point[3] { 0.0f, 0.0f, 0.0f };
+-    int rounds = 10;
+-    {
+-      dtStatus status;
+-      // critical section, force single thread running this
++    auto try_sample = [&](dtQueryFilter *active_filter) -> bool {
++      dtPolyRef random_ref { 0 };
++      float point[3] { 0.0f, 0.0f, 0.0f };
+       std::scoped_lock<std::mutex> lock(_mutex);
+-      do {
+-        status = _nav_query->findRandomPoint(filter, frand, &random_ref, point);
+-        // set the location in Unreal coords
++      for (int round = 0; round < 10; ++round) {
++        const dtStatus status = _nav_query->findRandomPoint(active_filter, frand, &random_ref, point);
+         if (status == DT_SUCCESS) {
+           location.x = point[0];
+           location.y = point[2];
+           location.z = point[1];
++          return true;
+         }
+-        --rounds;
+-      } while (status != DT_SUCCESS && rounds > 0);
++      }
++      return false;
++    };
++
++    if (try_sample(filter)) {
++      return true;
++    }
++
++    // OpenDRIVE maps without explicit sidewalk lanes can still build walkable
++    // crosswalk/grass navmeshes accepted by default crowd filter 0.
++    if (use_default_filter) {
++      filter2.setIncludeFlags(CARLA_TYPE_SIDEWALK | CARLA_TYPE_CROSSWALK | CARLA_TYPE_GRASS);
++      filter2.setExcludeFlags(CARLA_TYPE_NONE);
++      return try_sample(&filter2);
+     }
+ 
+-    return (rounds > 0);
++    return false;
+   }
+ 
+   // assign a filter index to an agent
+diff --git a/LibCarla/source/carla/opendrive/parser/RoadParser.cpp b/LibCarla/source/carla/opendrive/parser/RoadParser.cpp
+index 998b539..a064dcb 100644
+--- a/LibCarla/source/carla/opendrive/parser/RoadParser.cpp
++++ b/LibCarla/source/carla/opendrive/parser/RoadParser.cpp
+@@ -58,6 +58,8 @@ namespace parser {
+     JuncId junction_id;
+     RoadId predecessor;
+     RoadId successor;
++    int8_t predecessor_is_junction;
++    int8_t successor_is_junction;
+     bool is_rht;
+     std::vector<RoadTypeSpeed> speed;
+     std::vector<LaneOffset> section_offsets;
+@@ -118,7 +120,7 @@ namespace parser {
+     std::vector<Road> roads;
+ 
+     for (pugi::xml_node node_road : xml.child("OpenDRIVE").children("road")) {
+-      Road road { 0, "", 0.0, -1, 0, 0, true, {}, {}, {} };
++      Road road { 0, "", 0.0, -1, 0, 0, -1, -1, true, {}, {}, {} };
+ 
+       // attributes
+       road.id = node_road.attribute("id").as_uint();
+@@ -135,13 +137,29 @@ namespace parser {
+         road.is_rht = true;
+       }
+       // link
++      auto parse_link_is_junction = [](const pugi::xml_node &node) -> int8_t {
++        if (!node.attribute("elementType")) {
++          return -1;
++        }
++        std::string etype = node.attribute("elementType").value();
++        StringUtil::ToLower(etype);
++        if (etype == "junction") {
++          return 1;
++        }
++        if (etype == "road") {
++          return 0;
++        }
++        return -1;
++      };
+       pugi::xml_node link = node_road.child("link");
+       if (link) {
+-        if (link.child("predecessor")) {
+-          road.predecessor = link.child("predecessor").attribute("elementId").as_uint();
++        if (pugi::xml_node pred = link.child("predecessor")) {
++          road.predecessor = pred.attribute("elementId").as_uint();
++          road.predecessor_is_junction = parse_link_is_junction(pred);
+         }
+-        if (link.child("successor")) {
+-          road.successor = link.child("successor").attribute("elementId").as_uint();
++        if (pugi::xml_node succ = link.child("successor")) {
++          road.successor = succ.attribute("elementId").as_uint();
++          road.successor_is_junction = parse_link_is_junction(succ);
+         }
+       }
+ 
+@@ -303,7 +321,9 @@ namespace parser {
+           r.junction_id,
+           r.predecessor,
+           r.successor,
+-          r.is_rht);
++          r.is_rht,
++          r.predecessor_is_junction,
++          r.successor_is_junction);
+ 
+       // type speed
+       for (const auto& s : r.speed) {
 diff --git a/LibCarla/source/carla/road/Map.cpp b/LibCarla/source/carla/road/Map.cpp
 index 00a206f..fd46d97 100644
 --- a/LibCarla/source/carla/road/Map.cpp
@@ -74,6 +203,87 @@ index 00a206f..fd46d97 100644
            const double road_length = road.GetLength();
            const double z0 = road.GetElevationOn(s0).Evaluate(s0);
  
+diff --git a/LibCarla/source/carla/road/MapBuilder.cpp b/LibCarla/source/carla/road/MapBuilder.cpp
+index b779e36..4057ad3 100644
+--- a/LibCarla/source/carla/road/MapBuilder.cpp
++++ b/LibCarla/source/carla/road/MapBuilder.cpp
+@@ -417,7 +417,9 @@ namespace road {
+         const JuncId junction_id,
+         const RoadId predecessor,
+         const RoadId successor,
+-        const bool is_rht)
++        const bool is_rht,
++        const int8_t predecessor_is_junction,
++        const int8_t successor_is_junction)
+     {
+ 
+       // add it
+@@ -433,6 +435,8 @@ namespace road {
+       road->_is_rht = is_rht;
+       road->_successor = successor;
+       road->_predecessor = predecessor;
++      road->_predecessor_is_junction = predecessor_is_junction;
++      road->_successor_is_junction = successor_is_junction;
+ 
+       return road;
+   }
+@@ -719,16 +723,23 @@ namespace road {
+     // successor and predecessor (road and lane)
+     LaneId next;
+     RoadId next_road;
++    int8_t link_is_junction = -1;
+     if (lane->IsPositiveDirection()) {
+       next_road = road.GetSuccessor();
+       next = lane->GetSuccessor();
++      link_is_junction = road._successor_is_junction;
+     } else {
+       next_road = road.GetPredecessor();
+       next = lane->GetPredecessor();
++      link_is_junction = road._predecessor_is_junction;
+     }
+ 
+-    // check to see if next is a road or a junction
+-    bool next_is_junction = !_map_data.ContainsRoad(next_road);
++    // Honour OpenDRIVE <link> elementType ("junction" vs "road") when present,
++    // since ASAM OpenDRIVE scopes IDs per element class and allows a <junction>
++    // to share its numeric id with a <road>.
++    bool next_is_junction = (link_is_junction >= 0)
++        ? (link_is_junction == 1)
++        : !_map_data.ContainsRoad(next_road);
+     double s = section.GetDistance();
+ 
+     // check if we are in a lane section in the middle
+diff --git a/LibCarla/source/carla/road/MapBuilder.h b/LibCarla/source/carla/road/MapBuilder.h
+index 19a6e7c..ce047db 100644
+--- a/LibCarla/source/carla/road/MapBuilder.h
++++ b/LibCarla/source/carla/road/MapBuilder.h
+@@ -32,7 +32,9 @@ namespace road {
+         const JuncId junction_id,
+         const RoadId predecessor,
+         const RoadId successor,
+-        const bool is_rht);
++        const bool is_rht,
++        const int8_t predecessor_is_junction = -1,
++        const int8_t successor_is_junction = -1);
+ 
+     carla::road::LaneSection *AddRoadSection(
+         carla::road::Road *road,
+diff --git a/LibCarla/source/carla/road/Road.h b/LibCarla/source/carla/road/Road.h
+index 88ca636..10e5e51 100644
+--- a/LibCarla/source/carla/road/Road.h
++++ b/LibCarla/source/carla/road/Road.h
+@@ -211,6 +211,11 @@ namespace road {
+ 
+     RoadId _predecessor { 0 };
+ 
++    // -1 = elementType omitted (legacy fallback), 0 = elementType="road", 1 = elementType="junction"
++    int8_t _successor_is_junction { -1 };
++
++    int8_t _predecessor_is_junction { -1 };
++
+     InformationSet _info;
+ 
+     std::vector<Road *> _nexts;
 diff --git a/LibCarla/source/carla/trafficmanager/ALSM.cpp b/LibCarla/source/carla/trafficmanager/ALSM.cpp
 index 25579b7..d4de499 100644
 --- a/LibCarla/source/carla/trafficmanager/ALSM.cpp
@@ -276,6 +486,29 @@ index 528f38b..99ef5b4 100644
  ; The blueprint library advertises every JSON catalog entry, but the cook only pulls
  ; what the cooked maps reference; without these, those blueprints fail to spawn.
  +DirectoriesToAlwaysCook=(Path="/Game/Carla/Blueprints/Vehicles")
+diff --git a/Unreal/CarlaUnreal/Plugins/Carla/Source/Carla/Actor/ActorDispatcher.cpp b/Unreal/CarlaUnreal/Plugins/Carla/Source/Carla/Actor/ActorDispatcher.cpp
+index 43fb891..5aa6eba 100644
+--- a/Unreal/CarlaUnreal/Plugins/Carla/Source/Carla/Actor/ActorDispatcher.cpp
++++ b/Unreal/CarlaUnreal/Plugins/Carla/Source/Carla/Actor/ActorDispatcher.cpp
+@@ -187,6 +187,18 @@ bool UActorDispatcher::DestroyActor(FCarlaActor::IdType ActorId)
+ 
+   const FString &Id = View->GetActorInfo()->Description.Id;
+ 
++  // Read-only external dormant proxies (such as Mass ECS traffic/crowd mirrors
++  // registered at >= DORMANT_ID_BASE) are owned by their external subsystem;
++  // client cleanup loops over world.get_actors().filter("vehicle.*") must not
++  // deregister them out from under the bridge.
++  if (ActorId >= FActorRegistry::DORMANT_ID_BASE)
++  {
++    UE_LOG(LogCarla, Verbose,
++           TEXT("Ignoring DestroyActor on external dormant proxy %u ('%s')"),
++           ActorId, *Id);
++    return false;
++  }
++
+   // Destroy its controller if present.
+   AActor* Actor = View->GetActor();
+   if(Actor)
 diff --git a/Unreal/CarlaUnreal/Plugins/Carla/Source/Carla/Actor/ActorRegistry.cpp b/Unreal/CarlaUnreal/Plugins/Carla/Source/Carla/Actor/ActorRegistry.cpp
 index 18dcdfd..43bc3bf 100644
 --- a/Unreal/CarlaUnreal/Plugins/Carla/Source/Carla/Actor/ActorRegistry.cpp
@@ -517,19 +750,140 @@ index 8cf0ea1..0e57a02 100644
        Source->RegisterComponent();
  
 diff --git a/Unreal/CarlaUnreal/Plugins/Carla/Source/Carla/Game/CarlaGameModeBase.cpp b/Unreal/CarlaUnreal/Plugins/Carla/Source/Carla/Game/CarlaGameModeBase.cpp
-index 69a9648..dc0f629 100644
+index 69a9648..a473869 100644
 --- a/Unreal/CarlaUnreal/Plugins/Carla/Source/Carla/Game/CarlaGameModeBase.cpp
 +++ b/Unreal/CarlaUnreal/Plugins/Carla/Source/Carla/Game/CarlaGameModeBase.cpp
-@@ -37,6 +37,8 @@
+@@ -35,10 +35,110 @@
+ #include "Async/ParallelFor.h"
+ #include "DynamicRHI.h"
  #include "DrawDebugHelpers.h"
++#include "HAL/IConsoleManager.h"
  #include "Kismet/KismetSystemLibrary.h"
  #include "Misc/PackageName.h"
++#include "UObject/UObjectIterator.h"
 +#include "Components/WorldPartitionStreamingSourceComponent.h"
 +#include "WorldPartition/WorldPartitionSubsystem.h"
  #include <util/ue-header-guard-end.h>
  
++namespace
++{
++  static TAutoConsoleVariable<bool> CVarCarlaKeepFallbackSkyOnLitMaps(
++      TEXT("carla.Weather.KeepFallbackSkyOnLitMaps"),
++      false,
++      TEXT("Keep BP_Carla_Sky even when the loaded map already ships its own non-CARLA "
++           "UDirectionalLightComponent sun rig."),
++      ECVF_Default);
++
++  bool MapHasExternalDirectionalSun(UWorld *World)
++  {
++    if (World == nullptr)
++    {
++      return false;
++    }
++    for (TObjectIterator<UDirectionalLightComponent> It; It; ++It)
++    {
++      const UDirectionalLightComponent *Light = *It;
++      if (Light == nullptr || Light->GetWorld() != World ||
++          Light->HasAnyFlags(RF_ClassDefaultObject))
++      {
++        continue;
++      }
++      const AActor *Owner = Light->GetOwner();
++      if (!IsValid(Owner))
++      {
++        continue;
++      }
++      bool bOwnedByCarlaSky = false;
++      for (const AActor *Cur = Owner; Cur != nullptr;)
++      {
++        if (Cur->IsA<ASkyBase>() || Cur->IsA<AWeather>() ||
++            Cur->ActorHasTag(ASkyBase::FallbackSkyTag))
++        {
++          bOwnedByCarlaSky = true;
++          break;
++        }
++        const AActor *Next = Cur->GetAttachParentActor();
++        if (Next == nullptr)
++        {
++          Next = Cur->GetOwner();
++        }
++        if (Next == Cur)
++        {
++          break;
++        }
++        Cur = Next;
++      }
++      if (bOwnedByCarlaSky)
++      {
++        continue;
++      }
++      if (Light->IsVisible() && Light->Intensity > 0.0f)
++      {
++        return true;
++      }
++    }
++    return false;
++  }
++
++  void RemoveFallbackSkyIfExternalSunPresent(UWorld *World)
++  {
++    if (World == nullptr || CVarCarlaKeepFallbackSkyOnLitMaps.GetValueOnGameThread() ||
++        !MapHasExternalDirectionalSun(World))
++    {
++      return;
++    }
++    TArray<AActor *> Fallbacks;
++    UGameplayStatics::GetAllActorsWithTag(World, ASkyBase::FallbackSkyTag, Fallbacks);
++    if (Fallbacks.IsEmpty())
++    {
++      return;
++    }
++    for (AActor *Fallback : Fallbacks)
++    {
++      if (!IsValid(Fallback))
++      {
++        continue;
++      }
++      TArray<AActor *> Attached;
++      Fallback->GetAttachedActors(Attached, true, true);
++      for (AActor *Child : Attached)
++      {
++        if (IsValid(Child))
++        {
++          Child->Destroy();
++        }
++      }
++      Fallback->Destroy();
++    }
++    UE_LOG(LogCarla, Log,
++           TEXT("External directional sun detected: removed %d fallback BP_Carla_Sky rig(s)"),
++           Fallbacks.Num());
++  }
++}
++
  namespace cr = carla::road;
-@@ -329,6 +331,14 @@ void ACarlaGameModeBase::BeginPlay()
+ namespace crp = carla::rpc;
+ namespace cre = carla::road::element;
+@@ -161,7 +261,9 @@ void ACarlaGameModeBase::InitGame(
+     UE_LOG(LogCarla, Error, TEXT("Missing CarlaSettingsDelegate!"));
+   }
+ 
+-  if (UGameplayStatics::GetActorOfClass(World, ASkyBase::StaticClass()) == nullptr)
++  if (UGameplayStatics::GetActorOfClass(World, ASkyBase::StaticClass()) == nullptr &&
++      (CVarCarlaKeepFallbackSkyOnLitMaps.GetValueOnGameThread() ||
++       !MapHasExternalDirectionalSun(World)))
+   {
+     // Imported maps and converted tiled maps carry no sun/sky rig, and
+     // BP_CarlaWeather drives all lighting through a single ASkyBase actor.
+@@ -314,6 +416,7 @@ void ACarlaGameModeBase::BeginPlay()
+ 
+   LoadMapLayer(GameInstance->GetCurrentMapLayer());
+   ReadyToRegisterObjects = true;
++  RemoveFallbackSkyIfExternalSunPresent(World);
+ 
+   ATagger::TagActorsInLevel(*World, true);
+   TaggerDelegate->SetSemanticSegmentationEnabled();
+@@ -329,6 +432,14 @@ void ACarlaGameModeBase::BeginPlay()
          this, &ACarlaGameModeBase::OnLevelAddedToWorld);
    }
  
@@ -544,7 +898,15 @@ index 69a9648..dc0f629 100644
    // HACK: fix transparency see-through issues
    // The problem: transparent objects are visible through walls.
    // This is due to a weird interaction between the SkyAtmosphere component,
-@@ -592,9 +602,42 @@ void ACarlaGameModeBase::OnLevelAddedToWorld(ULevel* InLevel, UWorld* InWorld)
+@@ -571,6 +682,7 @@ void ACarlaGameModeBase::OnLevelAddedToWorld(ULevel* InLevel, UWorld* InWorld)
+     return;
+   }
+   ATagger::TagActorsInLevel(*InLevel, true);
++  RemoveFallbackSkyIfExternalSunPresent(InWorld);
+ 
+   // A converted map's baked TrafficLightManager can stream in later as a
+   // duplicate of the persistent-level manager installed at BeginPlay (see
+@@ -592,9 +704,43 @@ void ACarlaGameModeBase::OnLevelAddedToWorld(ULevel* InLevel, UWorld* InWorld)
    }
  }
  
@@ -567,6 +929,7 @@ index 69a9648..dc0f629 100644
 +  LastStreamingRetagTime = Now;
 +
 +  ATagger::TagNewActorsInWorld(*World, TaggedStreamingActors, true);
++  RemoveFallbackSkyIfExternalSunPresent(World);
 +}
 +
  void ACarlaGameModeBase::EndPlay(const EEndPlayReason::Type EndPlayReason)
@@ -587,7 +950,7 @@ index 69a9648..dc0f629 100644
    FCarlaStaticDelegates::OnEpisodeSettingsChange.Remove(OnEpisodeSettingsChangeHandle);
  
    Episode->EndPlay();
-@@ -1072,4 +1115,31 @@ void ACarlaGameModeBase::OnUnloadStreamLevel()
+@@ -1072,4 +1218,31 @@ void ACarlaGameModeBase::OnUnloadStreamLevel()
  void ACarlaGameModeBase::OnEpisodeSettingsChanged(const FEpisodeSettings &Settings)
  {
    CarlaSettingsDelegate->SetAllActorsDrawDistance(GetWorld(), Settings.MaxCullingDistance);
@@ -1254,6 +1617,21 @@ index 6606e42..4a01c35 100644
  }
  
  bool UCarlaNavigationSubsystem::GetRandomNavLocation(FVector &OutLocation) const
+diff --git a/Unreal/CarlaUnreal/Plugins/Carla/Source/Carla/Recorder/CarlaRecorder.cpp b/Unreal/CarlaUnreal/Plugins/Carla/Source/Carla/Recorder/CarlaRecorder.cpp
+index c455821..d1c80a4 100644
+--- a/Unreal/CarlaUnreal/Plugins/Carla/Source/Carla/Recorder/CarlaRecorder.cpp
++++ b/Unreal/CarlaUnreal/Plugins/Carla/Source/Carla/Recorder/CarlaRecorder.cpp
+@@ -118,6 +118,10 @@ void ACarlaRecorder::Ticking(float DeltaSeconds)
+     for (auto It = Registry.begin(); It != Registry.end(); ++It)
+     {
+       FCarlaActor* View = It->Value.Get();
++      if (View == nullptr || View->GetActorId() >= FActorRegistry::DORMANT_ID_BASE)
++      {
++        continue;
++      }
+ 
+       switch (View->GetActorType())
+       {
 diff --git a/Unreal/CarlaUnreal/Plugins/Carla/Source/Carla/Recorder/CarlaReplayerHelper.cpp b/Unreal/CarlaUnreal/Plugins/Carla/Source/Carla/Recorder/CarlaReplayerHelper.cpp
 index 400a67b..a0a4553 100644
 --- a/Unreal/CarlaUnreal/Plugins/Carla/Source/Carla/Recorder/CarlaReplayerHelper.cpp
@@ -1441,6 +1819,58 @@ index 7357092..941d8c9 100644
      TraceParams,
      FCollisionResponseParams::DefaultResponseParam
    );
+diff --git a/Unreal/CarlaUnreal/Plugins/Carla/Source/Carla/Server/CarlaServer.cpp b/Unreal/CarlaUnreal/Plugins/Carla/Source/Carla/Server/CarlaServer.cpp
+index dd1eefe..1a27001 100644
+--- a/Unreal/CarlaUnreal/Plugins/Carla/Source/Carla/Server/CarlaServer.cpp
++++ b/Unreal/CarlaUnreal/Plugins/Carla/Source/Carla/Server/CarlaServer.cpp
+@@ -806,27 +806,40 @@ void FCarlaServer::FPimpl::BindActions()
+       }
+     }
+ 
+-    // Generated OpenDRIVE worlds keep their xodr/nav in Saved/; they are
+-    // served under the conventional Carla/Maps/{OpenDrive,Nav}/ names and
+-    // filtered by the requested sub-folder like the content walk above.
++    // Generated OpenDRIVE worlds keep their xodr/nav in Saved/; non-generated
++    // maps may also ship or override sidecar files in Saved/{OpenDrive,Nav}/
++    // when Content/ carries none (matching FNavigationMesh::Load and
++    // UOpenDrive::FindPathToXODRFile).
+     const FString SavedDir = FPaths::ConvertRelativePathToFull(FPaths::ProjectSavedDir()) / TEXT("");
+-    if (bGeneratedWorld)
+     {
+       const FString Folder = UTF8_TO_TCHAR(folder.c_str());
+       const bool bWantXODR = Folder.IsEmpty() || Folder.StartsWith(TEXT("OpenDrive"), ESearchCase::IgnoreCase);
+       const bool bWantNav = Folder.IsEmpty() || Folder.StartsWith(TEXT("Nav"), ESearchCase::IgnoreCase);
+-      if (bWantNav)
++      if (bGeneratedWorld && bWantNav)
+       {
+         // The client asks for the navmesh right after load_world; RecastBuilder
+         // may still be running (bounded wait, logs on failure).
+         UCarlaEpisode::WaitForPendingNavigationBuild(60.0);
+       }
++      bool bHasXODR = false;
++      bool bHasNav = false;
++      for (const FString &Existing : Files)
++      {
++        bHasXODR |= Existing.EndsWith(TEXT(".xodr"), ESearchCase::IgnoreCase);
++        bHasNav |= Existing.EndsWith(TEXT(".bin"), ESearchCase::IgnoreCase);
++      }
+       // Where this server keeps the xodr: a Multi-GPU secondary has its own
+       // folder, and builds no navigation mesh.
+       const FString SavedXODR = UOpenDrive::GetSavedXODRPath(Episode->GetMapName());
+       const FString SavedNav = SavedDir / TEXT("Nav") / (Episode->GetMapName() + TEXT(".bin"));
+-      if (bWantXODR && IFileManager::Get().FileExists(*SavedXODR)) Files.Add(SavedXODR);
+-      if (bWantNav && !bIsSecondaryServer && IFileManager::Get().FileExists(*SavedNav)) Files.Add(SavedNav);
++      if (bWantXODR && (bGeneratedWorld || !bHasXODR) && IFileManager::Get().FileExists(*SavedXODR))
++      {
++        Files.Add(SavedXODR);
++      }
++      if (bWantNav && !bIsSecondaryServer && (bGeneratedWorld || !bHasNav) && IFileManager::Get().FileExists(*SavedNav))
++      {
++        Files.Add(SavedNav);
++      }
+     }
+ 
+     // Remove the start of the path until the content folder and put each file
 diff --git a/Unreal/CarlaUnreal/Plugins/Carla/Source/Carla/Traffic/TrafficLightManager.cpp b/Unreal/CarlaUnreal/Plugins/Carla/Source/Carla/Traffic/TrafficLightManager.cpp
 index c68afca..037fbf7 100644
 --- a/Unreal/CarlaUnreal/Plugins/Carla/Source/Carla/Traffic/TrafficLightManager.cpp

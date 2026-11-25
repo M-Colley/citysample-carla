@@ -256,7 +256,8 @@ int32 UCarlaFastGeoTaggerSubsystem::TagFastGeoGeometry()
     for (TObjectIterator<UFastGeoContainer> It; It; ++It)
     {
         UFastGeoContainer *Container = *It;
-        if (Container == nullptr || Container->GetWorld() != World)
+        if (Container == nullptr || Container->GetWorld() != World ||
+            (!Container->IsRegistered() && !Container->IsRegistering()))
         {
             continue;
         }
@@ -373,7 +374,7 @@ int32 UCarlaFastGeoTaggerSubsystem::TagFastGeoGeometry()
                 Existing.Data[kCarlaLabelFloatIndex + 0] == 0.0f &&
                 Existing.Data[kCarlaLabelFloatIndex + 1] == TargetLabel)
             {
-                if (!Prim->IsRenderStateCreated())
+                if (Prim->ShouldCreateRenderState() && !Prim->IsRenderStateCreated())
                 {
                     ++Deferred;
                     ++ContainerDeferred;
@@ -396,7 +397,7 @@ int32 UCarlaFastGeoTaggerSubsystem::TagFastGeoGeometry()
             Prim->SetCustomPrimitiveData(Data);
 
             // DO NOT force MarkRenderStateDirty(true) here: see FastGeoPrimitiveComponent.cpp:331.
-            if (!Prim->IsRenderStateCreated())
+            if (Prim->ShouldCreateRenderState() && !Prim->IsRenderStateCreated())
             {
                 ++Deferred;
                 ++ContainerDeferred;
@@ -428,7 +429,7 @@ int32 UCarlaFastGeoTaggerSubsystem::TagFastGeoGeometry()
         }
     }
 
-    if (Seen > 0 && (NewlyTagged > 0 || Deferred > 0 || Seen != LastSweepSeen ||
+    if (Seen > 0 && (NewlyTagged > 0 || Seen != LastSweepSeen ||
                      Containers != LastLoggedContainers))
     {
         UE_LOG(LogCarlaCitySample, Log,

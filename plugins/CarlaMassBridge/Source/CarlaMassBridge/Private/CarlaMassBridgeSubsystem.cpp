@@ -14,8 +14,10 @@
 #include "Carla/Actor/CarlaActor.h"
 #include "Carla/Game/CarlaEpisode.h"
 #include "Carla/Game/CarlaStatics.h"
+#include "Carla/Game/Tagger.h"
 #include "Carla/Util/BoundingBox.h"
 
+#include "Components/InstancedStaticMeshComponent.h"
 #include "Engine/World.h"
 #include "EngineUtils.h"
 #include "GameFramework/Pawn.h"
@@ -29,6 +31,7 @@
 #include "MassSpawner.h"
 #include "MassTrafficFragments.h"
 #include "MassTrafficSubsystem.h"
+#include "MassVisualizer.h"
 
 namespace
 {
@@ -335,6 +338,43 @@ void UCarlaMassBridgeSubsystem::Tick(float DeltaTime)
 {
     ApplyMassPopulationToggles();
     SyncCarlaObstaclesToMass();
+    TagDynamicMassVisualizers();
+}
+
+void UCarlaMassBridgeSubsystem::TagDynamicMassVisualizers()
+{
+    UWorld *World = GetWorld();
+    if (World == nullptr)
+    {
+        return;
+    }
+    const double Now = World->GetTimeSeconds();
+    if (Now - LastVisualizerTagTime < 0.5)
+    {
+        return;
+    }
+    LastVisualizerTagTime = Now;
+
+    for (TActorIterator<AMassVisualizer> It(World); It; ++It)
+    {
+        AMassVisualizer *Vis = *It;
+        if (!IsValid(Vis))
+        {
+            continue;
+        }
+        TInlineComponentArray<UInstancedStaticMeshComponent *> ISMComps(Vis);
+        const int32 Count = ISMComps.Num();
+        const FObjectKey Key(Vis);
+        if (const int32 *Prev = TaggedMassVisualizers.Find(Key))
+        {
+            if (*Prev == Count)
+            {
+                continue;
+            }
+        }
+        ATagger::TagActor(*Vis, true);
+        TaggedMassVisualizers.Add(Key, Count);
+    }
 }
 
 void UCarlaMassBridgeSubsystem::ApplyMassPopulationToggles()
@@ -591,6 +631,7 @@ void UCarlaMassBridgeSubsystem::RemoveAllObstacleEntities()
 
 void UCarlaMassBridgeSubsystem::Deinitialize()
 {
+    TaggedMassVisualizers.Reset();
     RemoveAllObstacleEntities();
     ObstacleArchetype.Reset();
     RemoveAllProxies();

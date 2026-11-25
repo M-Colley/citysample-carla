@@ -1,7 +1,8 @@
-# City Sample → CARLA
+# City Sample to CARLA
 
-Run Epic Games' **City Sample** (Unreal Engine 5.8) as a **CARLA 1.0** simulator — real city geometry, real CARLA traffic, and real CARLA sensors — or extract its road network as standalone ASAM OpenDRIVE.
+Run Epic Games' **City Sample** (Unreal Engine 5.8) as a **CARLA 1.0** simulator with native city geometry, synchronised traffic lights, CARLA traffic, and CARLA sensors, or extract its road network as standalone ASAM OpenDRIVE.
 
+[![CI](https://github.com/M-Colley/citysample-carla/actions/workflows/ci.yml/badge.svg)](https://github.com/M-Colley/citysample-carla/actions/workflows/ci.yml)
 [![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.22306770.svg)](https://doi.org/10.5281/zenodo.22306770)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
@@ -20,20 +21,20 @@ You can stop after Part A if you only need the road network, or continue through
 | **[Part A — Road network](#2-part-a--extract-the-road-network)** | `Small_City_LVL` and `Big_City_LVL` exported as ASAM **OpenDRIVE** (`.xodr`) with signals, signs, speed limits, and crosswalks. Runs in any CARLA (`generate_opendrive_world`). | Stock UE 5.8 + City Sample + Python 3.10+ |
 | **[Part B — Full city server](#3-part-b--run-city-sample-as-a-carla-10-server)** | CARLA 1.0 serving the City Sample levels directly — Nanite/Lumen buildings, props, Mass traffic & crowd, pedestrian navmeshes, and full sensor suite. | Also needs CARLA 1.0 + CARLA's UE 5.8 fork built from source (~385 GB disk, 64 GB RAM) |
 
-### Supported Maps (CARLA 1.0, `v1.1.1`)
+### Supported Maps (CARLA 1.0, `v1.2.0`)
 
 | Map | Footprint | Roads & Junctions | Signals & Curbside Signs | Pedestrian NavMesh |
 |---|---|---|---|---|
-| **`Small_City_LVL`** | `1.66 × 1.30 km` (`145 km` lanes) | `2,981` roads (`236` multi-lane) · `172` junctions (`4,672` spawns) | `355` lights · `193` stop · `2` yield · `197` speed (`30–90 km/h`) · `1,096` crosswalks | `620` tiles (`4.8 MB`) from `7,846` ZoneGraph pedestrian lanes |
-| **`Big_City_LVL`** | `4.16 × 4.99 km` (`1,197.5 km` lanes) | `21,712` roads (`1,312` multi-lane) · `1,236` junctions (`33,590` spawns) | `2,176` lights · `2,109` stop · `7` yield · `1,357` speed (`30–90 km/h`) · `8,310` crosswalks | `5,591` tiles (`40.0 MB`) from `59,384` ZoneGraph pedestrian lanes |
+| **`Small_City_LVL`** | `1.66 × 1.30 km` (`145 km` lanes) | `2,981` roads (`236` multi-lane) · `172` junctions (`4,672` spawns) | `355` synced lights · `193` stop · `2` yield · `197` speed (`30-90 km/h`) · `1,096` crosswalks | `620` tiles (`4.8 MB`) from `7,846` ZoneGraph pedestrian lanes |
+| **`Big_City_LVL`** | `4.16 × 4.99 km` (`1,197.5 km` lanes) | `21,712` roads (`1,312` multi-lane) · `1,236` junctions (`33,590` spawns) | `2,176` synced lights · `2,109` stop · `7` yield · `1,357` speed (`30-90 km/h`) · `8,310` crosswalks | `5,591` tiles (`40.0 MB`) from `59,384` ZoneGraph pedestrian lanes |
 
 > ### Quick Notes Before Collecting Data
 >
-> - **Works out of the box**: RGB, depth, GNSS, IMU, collision sensors, vehicle control, mid-block lane changes across multi-lane carriageways, **camera semantic segmentation** (`0.0 %–0.2 %` settled unlabeled on `Small_City_LVL`, `0.4 %` on `Big_City_LVL`, `0.00 %` out-of-range labels from Run 1), **semantic & plain LiDAR** (`1.26 %` unlabeled, `0` ego self-hits), **radar**, `ground_projection`, `cast_ray`, phased traffic lights, stop/yield/speed-limit signs (`0` poles in driving lanes), and exact crosswalks (`0.00 m` offset). (`carla.FastGeoTagger.Enable` and `carla.MassBridge.ExportCarlaObstacles` default to `1`.)
+> - **Works out of the box**: Properly exposed RGB cameras (CARLA's competing fallback sky is suppressed automatically on pre-lit levels), depth, GNSS, IMU, collision sensors, vehicle control, mid-block lane changes across multi-lane carriageways, **synchronised MassTraffic and CARLA traffic lights** (`355/355` on `Small_City_LVL` and `2,175/2,176` across all `619` groups on `Big_City_LVL`, `0` red-light violations in light or heavy traffic), **camera semantic segmentation** (`0.0 %` settled unlabeled on `Small_City_LVL`, `0.4 %` on `Big_City_LVL`, `0.00 %` out-of-range labels from Run 1, including Mass vehicles and pedestrians), **semantic & plain LiDAR** (`1.26 %-1.96 %` unlabeled, `0` ego self-hits), **radar**, `ground_projection`, `cast_ray`, stop/yield/speed-limit signs (`0` poles in driving lanes), and exact crosswalks (`0.00 m` offset). (`carla.MassBridge.SyncTrafficLights`, `carla.MassBridge.ActuateSignalisedIntersections`, `carla.FastGeoTagger.Enable`, and `carla.MassBridge.ExportCarlaObstacles` all default to `1`.)
 > - **Two opt-in additions**:
->   - Pass `-ExecCmds "carla.MassBridge.Enable 1"` to mirror Epic's ambient **Mass traffic and crowd** (`150` vehicles + `100` walkers nearest `role_name="hero"` or the spectator) into `world.get_actors()` with **two-way yielding** alongside CARLA's Traffic Manager — or pass `"carla.MassBridge.DisableMassTraffic 1"` for pure CARLA traffic (§3 Step 6).
->   - Build & install the **Recast navmesh** (`Content\Map\Nav\<Map>.bin`) to enable CARLA walkers and `get_random_location_from_navigation()` (§3 Step 3).
-> - **Caveats**: Allow ~20–25 s after moving to a new district for World Partition cells to finish streaming; speed/yield signs are derived from ZoneGraph metadata; and mirrored `.mass.` proxies are read-only. See **[Known Limitations](#8-known-limitations)** and **[docs/KNOWN-LIMITATIONS.md](docs/KNOWN-LIMITATIONS.md)**.
+>   - Pass `-ExecCmds "carla.MassBridge.Enable 1"` to mirror Epic's ambient **Mass traffic and crowd** (`150` vehicles + `100` walkers nearest `role_name="hero"` or the spectator) into `world.get_actors()` with **two-way yielding** alongside CARLA's Traffic Manager, or pass `"carla.MassBridge.DisableMassTraffic 1"` for pure CARLA traffic (overhead signals automatically switch to `CARLA -> Mass` sync; §3 Step 6).
+>   - Build & install the **Recast navmesh** (`Content\Map\Nav\<Map>.bin` or `Saved\Nav\<Map>.bin`) to enable CARLA walkers and `get_random_location_from_navigation()` (§3 Step 3).
+> - **Caveats**: Allow 20 to 25 s after moving to a new district for World Partition cells to finish streaming; speed and yield signs are derived from ZoneGraph metadata; and mirrored `.mass.` proxies are read-only (`destroy()` is safely rejected). See **[Known Limitations](#8-known-limitations)** and **[docs/KNOWN-LIMITATIONS.md](docs/KNOWN-LIMITATIONS.md)**.
 
 ---
 
@@ -174,8 +175,8 @@ powershell -File tools\Run-CarlaCity.ps1 -Map Big_City_LVL   # Big_City_LVL
 ```bash
 python tools/carla_probe.py --shots 4 --traffic 60         # map topology, RGB shots, Traffic Manager survival
 python tools/verify_sensors.py                             # semantic & plain LiDAR, radar, raytracer, segmentation
-python tools/carla_traffic_lights.py --watch 32            # lights, stop/yield/speed signs, phase cycling
-python tools/segmentation_census.py --settle 25            # semantic segmentation census (settles at 0.0%–0.4% Unlabeled)
+python tools/carla_traffic_lights.py --watch 32 --verify-sync  # signal sync, exposure, 0 red-light violations
+python tools/segmentation_census.py --settle 25            # semantic segmentation census (settles at 0.0%-0.4% Unlabeled)
 python tools/carla_mass_bridge.py --test-yielding          # Mass ECS proxies + two-way Mass <-> CARLA braking
 python tools/carla_walkers.py --walkers 30                 # navmesh spawning & pedestrian movement
 ```
@@ -187,12 +188,16 @@ Useful server flags (`Run-CarlaCity.ps1`):
 | `-Map Big_City_LVL` | `Small_City_LVL` | Serve the full `4.16 × 4.99 km` city instead of Small City |
 | `-Quality Medium` (or `Low`) | `Epic` | Lower UE5 scalability to raise FPS with multi-camera rigs |
 | `-RenderOffScreen` | off | Headless off-screen rendering |
+| `carla.MassBridge.SyncTrafficLights` | `1` | Synchronise MassTraffic and CARLA signals (`1`: Mass -> CARLA with pure-CARLA fallback; `2`: CARLA -> Mass; `0`: off) |
+| `carla.MassBridge.ActuateSignalisedIntersections` | `1` | Keep signalised Mass phases actuated before `EndPhysics` so light traffic never skips `3 s` Yellow intervals |
+| `carla.MassBridge.HideDuplicateCarlaTrafficLights` | `0` | Hide CARLA's spawned kerbside pole meshes when bound to an authored overhead Mass light (keeps trigger boxes) |
 | `-ExecCmds "carla.MassBridge.Enable 1"` | `0` | Mirror Epic's nearest 150 Mass vehicles + 100 walkers into `world.get_actors()` |
 | `carla.MassBridge.FollowHero` | `1` | Center mirrored Mass proxies on `role_name="hero"` (falls back to spectator) |
 | `carla.MassBridge.ExportCarlaObstacles` | `1` | Publish CARLA vehicles & walkers as `FMassTrafficObstacleTag` entities so MassTraffic brakes for them |
-| `carla.MassBridge.DisableMassTraffic` | `0` | Despawn ambient MassTraffic & parked vehicles from `-ExecCmds` (keeps traffic-light visuals) |
+| `carla.MassBridge.DisableMassTraffic` | `0` | Despawn ambient MassTraffic & parked vehicles from `-ExecCmds` (switches overhead lights to `CARLA -> Mass`) |
 | `carla.MassBridge.DisableMassCrowd` | `0` | Despawn ambient MassCrowd pedestrians from `-ExecCmds` |
-| `carla.FastGeoTagger.Enable` | `1` | Semantic segmentation & semantic LiDAR tagging for `FastGeoStreaming` geometry |
+| `carla.FastGeoTagger.Enable` | `1` | Semantic segmentation & semantic LiDAR tagging for registered `FastGeoStreaming` geometry |
+| `carla.Weather.KeepFallbackSkyOnLitMaps` | `0` | Keep CARLA's `BP_Carla_Sky` even when the map already owns a directional sun light |
 | `carla.Streaming.HeroRadiusCm` | engine default | Override the hero vehicle's World Partition streaming radius (or set `world_settings.tile_stream_distance` live from Python) |
 
 *(Note: pass multiple `-ExecCmds` separated by commas in PowerShell, e.g. `-ExecCmds "carla.MassBridge.Enable 1","carla.Streaming.HeroRadiusCm 60000"`.)*
@@ -221,18 +226,19 @@ python %CARLA_DIR%/PythonAPI/examples/nvidia/nurec/nurec_runner.py --port 2000 -
 
 ---
 
-## 5. Measured Validation (`v1.1.1` on CARLA 1.0)
+## 5. Measured Validation (`v1.2.0` on CARLA 1.0)
 
-All figures below were measured on the live CARLA `1.0` server (`3ea166118d2c` / UE 5.8 `b76fce0e3bcb`) with `FastGeoTagger` on by default and `MassBridge` enabled:
+All figures below were measured on the live CARLA `1.0` server (`3ea166118d2c` / UE 5.8 `b76fce0e3bcb`) with default `SyncTrafficLights=1`, default `FastGeoTagger=1`, default native-sun lighting, and `MassBridge` enabled:
 
 | Check | Tool | `Small_City_LVL` | `Big_City_LVL` |
 |---|---|---|---|
 | **Multi-Lane Routing & Crosswalks** | `carla_probe.py` | `2,981` roads (`236` multi-lane · `23,536` lane-change wps) · `1,096` crosswalks (`0.00 m` err) · `200/200` 500 m drives | `21,712` roads (`1,312` multi-lane · `158,358` lane-change wps) · `8,310` crosswalks (`0.00 m` err) · `200/200` 500 m drives |
-| **Traffic Manager + Two-Way Mass** | `carla_mass_bridge.py` | Live TM mid-block lane changes (`-1 -> -2`) · Mass brakes `17.9 -> 0.1 km/h` behind `hero` · `39/39` TM cars alive + `250` Mass proxies | Live TM mid-block lane changes (`-1 -> -2`) · Mass brakes `50.2 -> 0.0 km/h` behind `hero` · up to **`79 km/h`** on freeways + `250` Mass proxies |
-| **Signals & Curbside Signs** | `carla_traffic_lights.py` | `355` lights (`106` groups cycling) · `193` stop · `2` yield · `197` speed (`30 -> 50 km/h` live trigger) · `0` lane overlaps | `2,176` lights (`619` groups cycling) · `2,109` stop · `7` yield · `1,357` speed (`30 -> 50 km/h` live trigger) · `0` lane overlaps |
-| **Camera Segmentation** | `segmentation_census.py` | **`0.0 %–0.2 %` `Unlabeled`** (`Sky` = `11`, `0.00 %` `R > 29` from Run 1) | **`0.4 %` `Unlabeled`** settled at `(0, 0)` (`6.7 %` `Sky`, `0.00 %` `R > 29` from Run 1) |
-| **LiDAR, Radar & Ray Queries** | `verify_sensors.py` | Semantic LiDAR `273,276` pts (**`1.49 %` `Unlabeled`**), `284,964` ego-attached (`0` self-hits), radar `2,674`, `cast_ray` + `ground_projection` **PASS** | Semantic LiDAR `204,168` pts (**`1.26 %` `Unlabeled`**), `237,792` ego-attached (`0` self-hits), radar `2,941`, `cast_ray` + `ground_projection` **PASS** |
-| **Pedestrians (Measured Sidewalks)** | `carla_walkers.py` | `1` walkable island (`100 %`) · `20/20` random nav points · **`30/30` walkers moving** (median `21.0 m`) | `1` walkable island (`100 %`) · `20/20` random nav points · **`30/30` walkers moving** (median `21.1 m`) |
+| **Traffic Light Sync & Exposure** | `carla_traffic_lights.py --verify-sync` | **`355/355` bound** (`106` groups frozen) · **`0` red-light violations** · RGB `mean=75.3/255` (`0.00 %` white-saturated) | **`2,175/2,176` bound** (`619` groups frozen) · **`0` red-light violations** · RGB `mean=69.5/255` (`0.00 %` white-saturated) |
+| **Traffic Manager + Two-Way Mass** | `carla_mass_bridge.py` | Live TM mid-block lane changes (`-1 -> -2`) · Mass brakes **`75.6 -> 0.0 km/h`** behind `hero` · `250` Mass proxies (`destroy()` guarded) | Live TM mid-block lane changes (`-1 -> -2`) · Mass brakes **`38.3 -> 0.1 km/h`** behind `hero` · up to **`79 km/h`** on freeways + `250` Mass proxies |
+| **Curbside Signs & Speed Limits** | `carla_traffic_lights.py` | `193` stop · `2` yield · `197` speed (`30 -> 50 km/h` live trigger) · `0` lane overlaps | `2,109` stop · `7` yield · `1,357` speed (`30 -> 50 km/h` live trigger) · `0` lane overlaps |
+| **Camera Segmentation** | `segmentation_census.py` | **`0.0 %` `Unlabeled`** across Run 1 & Run 2 (`Sky` = `11`, `Car`, `Truck`, `Pedestrians`, `0.00 %` `R > 29`) | **`0.4 %` `Unlabeled`** settled across Run 1 & Run 2 (`6.8 %` `Sky`, `Car`, `Truck`, `Pedestrians`, `0.00 %` `R > 29`) |
+| **LiDAR, Radar & Ray Queries** | `verify_sensors.py` | Semantic LiDAR `273,276` pts (**`1.49 %` `Unlabeled`**), `260,422` ego-attached (`0` self-hits), radar `2,674`, `cast_ray` + `ground_projection` **PASS** | Semantic LiDAR `178,356` pts (**`1.96 %` `Unlabeled`**), `218,904` ego-attached (`0` self-hits), radar `470`, `cast_ray` + `ground_projection` **PASS** |
+| **Pedestrians (Measured Sidewalks)** | `carla_walkers.py` | `1` walkable island (`100 %`) · `20/20` random nav points · **`30/30` walkers moving** (median `21.0 m`) | `1` walkable island (`100 %`) · `20/20` random nav points · **`29/30` walkers moving** (median `20.9 m`) |
 
 ---
 
@@ -246,12 +252,12 @@ CityRoadExport (-run=ExportZoneGraph)
 ```
 
 - **Road semantics stay in Python**: The C++ `CityRoadExport` commandlet only serializes Epic's `FZoneGraphStorage` (which is not exposed to UE Python). Every conversion stage in `tools/` has `--selftest` and needs no C++ rebuild to iterate.
-- **`CarlaMassBridge` (`plugins/CarlaMassBridge/`)**: Contains both the Mass ECS → CARLA dormant-actor bridge and the `FastGeoStreaming` semantic tagger (`FObjectKey`-memoized).
-- **Where to edit**: `Integrate-CarlaIntoCitySample.ps1` copies plugins into `<CitySample>/Plugins/`. Always edit `plugins/CarlaMassBridge/` here or C++ files in `$CARLA_DIR` (regenerating `patches/carla-1.0-citysample.patch`), then re-integrate and rebuild — never edit `<CitySample>/Plugins/` directly.
+- **`CarlaMassBridge` (`plugins/CarlaMassBridge/`)**: Contains the bi-directional `MassTraffic <-> CARLA` traffic light synchroniser (`UCarlaTrafficLightActuationProcessor` and `UCarlaTrafficLightSyncProcessor`), the Mass ECS to CARLA dormant-actor bridge, dynamic `AMassVisualizer` ISM semantic tagging, and the `FastGeoStreaming` semantic tagger (`FObjectKey`-memoized).
+- **Where to edit**: `Integrate-CarlaIntoCitySample.ps1` copies plugins into `<CitySample>/Plugins/`. Always edit `plugins/CarlaMassBridge/` here or C++ files in `$CARLA_DIR` (regenerating `patches/carla-1.0-citysample.patch`), then re-integrate and rebuild; avoid editing `<CitySample>/Plugins/` directly.
 
 ```
 CityRoadExport/             UE 5.8 commandlet plugin (-run=ExportZoneGraph)
-plugins/CarlaMassBridge/    Mass -> CARLA actor bridge + FastGeo semantic tagger
+plugins/CarlaMassBridge/    Traffic light sync, Mass -> CARLA bridge, and FastGeo semantic tagger
 patches/                    CARLA 1.0 patch (carla-1.0-citysample.patch) + legacy 0.10 patch
 config/                     [CarlaTagger] asset-path semantic label rules
 tools/                      Python converters ([--selftest]), verification clients, and PowerShell build/run drivers
@@ -269,7 +275,7 @@ ISSUES-TO-FILE.md           13 reproducible upstream CARLA issues (12 filed on c
 
 | Symptom | Cause & Fix |
 |---|---|
-| Scene renders **blinding white** | CARLA's weather directional light competes with City Sample's sun. Set `weather.sun_altitude_angle = -90.0` (done automatically by `carla_probe.py` and `record_carla.py`). |
+| Scene renders **blinding white** | Unpatched CARLA spawns a second directional sun (`BP_Carla_Sky`). Re-run `Integrate-CarlaIntoCitySample.ps1` and `Build-CarlaCity.ps1` (`patches/carla-1.0-citysample.patch` suppresses `BP_Carla_Sky` automatically on pre-lit levels; set `weather.sun_altitude_angle = -90.0` only on older builds). |
 | `world.get_map()` → **`failed to generate map`** | Missing `Saved\OpenDrive\<MapName>.xodr`. Run Part A + `Integrate-CarlaIntoCitySample.ps1`. |
 | `get_world()` **times out** right after port opens | Unreal is still compiling DDC assets or streaming initial World Partition cells. Watch `logs/run-carlacity.log` until steady ticks begin. |
 | Startup **access violation** in `PreInitPostStartupScreen` | Unpatched CARLA CDO constructors loading `/Game/` assets too early. Run `Integrate-CarlaIntoCitySample.ps1` so `patches/carla-1.0-citysample.patch` is applied, then rebuild. |

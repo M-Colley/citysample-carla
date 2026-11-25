@@ -93,17 +93,11 @@ If you modify the C++ plugins or Python converters, keep these invariants in min
    `CreateEntity` / `DestroyEntity` calls assert `!EntityManager.IsProcessing()`.
    `UCarlaMassBridgeSubsystem::Tick` syncs CARLA obstacle entities on the game
    thread outside Mass processor execution and guards `IsProcessing()`.
-5. **OpenDRIVE junction IDs must be disjoint from road IDs**: CARLA's
-   `RoadParser` ignores `elementType="junction"` on road `<link>` elements whenever
-   a `<road>` shares the same numeric `id` ([carla#9869](https://github.com/carla-simulator/carla/issues/9869)).
-   `roadnetwork_to_xodr.py` offsets all junction IDs above the maximum road ID
-   and `--selftest` enforces this.
+5. **OpenDRIVE junction IDs vs. road IDs**: Stock CARLA's `RoadParser` ignores `elementType="junction"` on road `<link>` elements whenever a `<road>` shares the same numeric `id` ([carla#9869](https://github.com/carla-simulator/carla/issues/9869)). Both `patches/carla-1.0-citysample.patch` (preserving `elementType` in `RoadParser` and `MapBuilder`) and `roadnetwork_to_xodr.py` (offsetting junction IDs above the maximum road ID for unpatched stock CARLA) enforce this invariant.
 6. **Pedestrian navmesh path & client ticking**:
-   - CARLA's client fetches `Content/Map/Nav/<MapName>.bin` (not `Saved/Nav/`)
-     for existing UE levels ([carla#9870](https://github.com/carla-simulator/carla/issues/9870)).
-   - Detour crowd simulation runs in the **Python client** inside `world.tick()` /
-     `world.wait_for_tick()`; scripts that only `time.sleep()` will see walkers
-     spawn and stand still.
+   - Stock CARLA's `get_required_files("Nav")` ignores `Saved/Nav/<MapName>.bin` on pre-existing UE levels ([carla#9870](https://github.com/carla-simulator/carla/issues/9870)); `patches/carla-1.0-citysample.patch` fixes `get_required_files` to check `Saved/` first, and `Integrate-CarlaIntoCitySample.ps1` also deploys to `Content/Map/Nav/<MapName>.bin`.
+   - Detour crowd simulation runs in the **Python client** inside `world.tick()` / `world.wait_for_tick()`; scripts that only `time.sleep()` will see walkers spawn and stand still.
+7. **MassTraffic processor group ordering**: `UMassTrafficUpdateIntersectionsProcessor` runs inside `UE::MassTraffic::ProcessorGroupNames::EndPhysicsIntersectionBehavior`; any processor that actuates `bIsVehicleReadyToUseLane` before intersection evaluation must join `EndPhysicsIntersectionBehavior` alongside `ExecuteBefore` so UE's Mass dependency solver orders it ahead of the group's internal execution.
 
 ---
 
@@ -111,6 +105,10 @@ If you modify the C++ plugins or Python converters, keep these invariants in min
 
 | Previously broken / limited | Resolution | Verification tool |
 |---|---|---|
+| AVs ran visible red lights in light traffic (`MassTraffic` vs. CARLA signal desync, skipped Yellow phases, and `3.0 m` stop-line boxes on `50-90 km/h` arterials) | `UCarlaTrafficLightActuationProcessor` (`EndPhysicsIntersectionBehavior`) repairs `RetimeIntersectionPeriods` flags and actuates signalised phases; `UCarlaTrafficLightSyncProcessor` (`SyncTrafficLights=1` default) freezes CARLA timers, mirrors live `FMassTrafficLight` states (`355/355` on `Small_City_LVL`, `2,175/2,176` across `619` groups on `Big_City_LVL`), extends stop-line trigger boxes to `[s_sig - 10 m, s_sig + 1 m]`, and falls back to `CARLA -> Mass` when `DisableMassTraffic 1` is set: **`0` red-light violations** | `tools/carla_traffic_lights.py --verify-sync` |
+| Blinding-white RGB viewport from competing `BP_Carla_Sky` sun ([carla#9866](https://github.com/carla-simulator/carla/issues/9866)) | `ACarlaGameModeBase` detects existing non-CARLA `UDirectionalLightComponent` suns and suppresses `BP_Carla_Sky` automatically (`KeepFallbackSkyOnLitMaps=0` default): **`0.00 %` white saturation** out of the box | `tools/carla_traffic_lights.py --verify-sync` |
+| `AMassVisualizer` ISM vehicles/pedestrians untagged, dormant `.mass.` proxies accepted `destroy()`, and `CarlaFastGeoTagger` re-swept unregistered containers | `UCarlaMassBridgeSubsystem` tags `AMassVisualizer` ISM components every `0.5 s`; `ActorDispatcher` and `CarlaRecorder` guard `>= DORMANT_ID_BASE`; `CarlaFastGeoTagger` filters `Container->IsRegistered()` | `tools/segmentation_census.py` |
+| `get_required_files` ignored `Saved/Nav/`, `GetRandomLocation` failed without sidewalk polys, and `RoadParser` dropped `<link>` `elementType` ([carla#9869](https://github.com/carla-simulator/carla/issues/9869), [#9870](https://github.com/carla-simulator/carla/issues/9870), [#9871](https://github.com/carla-simulator/carla/issues/9871)) | All three fixed in `patches/carla-1.0-citysample.patch` (`CarlaServer.cpp`, `Navigation.cpp`, `RoadParser.cpp`, `MapBuilder.cpp`) | `tools/carla_walkers.py` |
 | Ray-cast sensors (LiDAR, radar, `cast_ray`) returned 0 hits or ego self-hits | Named collision channels 8–10 (`SensorObject`, `SensorTrace`, `OverlapChannel`) & `GetOwner()` ignore ([carla#10365](https://github.com/carla-simulator/carla/issues/10365), [PR #10371](https://github.com/carla-simulator/carla/pull/10371)) | `tools/verify_sensors.py` |
 | `URayTracer` crashed on `FastGeoStreaming` hits (`Hit.GetComponent() == nullptr`) | Null-safe `ATagger::GetTagOfHit` + FastGeo physics hit resolver ([carla#10364](https://github.com/carla-simulator/carla/issues/10364), [PR #10370](https://github.com/carla-simulator/carla/pull/10370)) | `tools/verify_sensors.py` |
 | First-run segmentation `R > 29` (`INVALID` class IDs) & `98.8 %` `Unlabeled` | `CarlaFastGeoTagger` + `ATagger` clear HLOD `CustomPrimitiveData[4..5]` to `0`, `SM_dome` -> `Sky` (`11`), `GTMaterial` PSO warmup: **`0.00 %` `R > 29` on Run 1**, **`0.0 %–0.2 %` / `0.4 %`** settled `Unlabeled` | `tools/segmentation_census.py` |

@@ -1,0 +1,48 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  selftests:
+    name: Converter selftests & syntax checks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Run converter --selftest suites
+        run: |
+          python tools/zonegraph_to_roadnetwork.py --selftest
+          python tools/roadnetwork_to_xodr.py --selftest
+          python tools/xodr_to_recast_obj.py --selftest
+          python tools/masstraffic_lights_to_json.py --selftest
+          python tools/add_signals_to_xodr.py --selftest
+
+      - name: Byte-compile all Python tools
+        run: python -m py_compile tools/*.py
+
+  patch-check:
+    name: Verify CARLA 1.0 patch applies cleanly
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Fetch CARLA 1.0 release commit (3ea166118d2c) and check patch
+        run: |
+          mkdir -p /tmp/carla-check
+          git -C /tmp/carla-check init
+          git -C /tmp/carla-check remote add origin https://github.com/carla-simulator/carla.git
+          git -C /tmp/carla-check fetch --depth 1 origin 3ea166118d2c3c094b13b15c5b7a66a9a279998d
+          git -C /tmp/carla-check checkout FETCH_HEAD
+          git -C /tmp/carla-check apply --check "$GITHUB_WORKSPACE/patches/carla-1.0-citysample.patch"
+          git -C /tmp/carla-check apply "$GITHUB_WORKSPACE/patches/carla-1.0-citysample.patch"
+          git -C /tmp/carla-check apply --reverse --check "$GITHUB_WORKSPACE/patches/carla-1.0-citysample.patch"

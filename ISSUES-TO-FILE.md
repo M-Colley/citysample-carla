@@ -12,7 +12,7 @@ OpenDRIVE `<laneOffset>` crosswalks.
 Verified against `carla-simulator/carla@de3f38e64` (`ue58-dev-carla`, issues
 1-9) and `carla-simulator/carla@3ea166118d2c` (`1.0` / `ue58-dev`, issues 10-13).
 
-**Filing & CARLA `1.0` (`3ea166118d2c`) status.** Twelve of the thirteen issues are filed upstream (`OPEN`); CARLA `1.0` resolved Issues 2 and 3, while Issues 10–13 are patched locally in `patches/carla-1.0-citysample.patch` (initial upstream PRs `#10368`–`#10371` were closed by triage pending PR-template and test-suite updates):
+**Filing & CARLA `1.0` (`3ea166118d2c`) status.** Twelve of the thirteen issues are filed upstream (`OPEN`); CARLA `1.0` resolved Issues 2 and 3, while Issues 4 through 13 are all patched locally in `patches/carla-1.0-citysample.patch` (initial upstream PRs `#10368`-`#10371` were closed by triage pending PR-template and test-suite updates):
 
 | # | upstream | CARLA 1.0 status | title |
 |---|---|---|---|
@@ -20,11 +20,11 @@ Verified against `carla-simulator/carla@de3f38e64` (`ue58-dev-carla`, issues
 | 2 | not filed | **Fixed in `1.0`** (`Docs/build_windows_ue5.md` now targets UE 5.8) | Windows build docs still say UE 5.5 / `ue5-dev` |
 | 3 | [#9864](https://github.com/carla-simulator/carla/issues/9864) | **Closed / Fixed in `1.0`** | `Carla` plugin fails to compile on `ue58-dev-carla` |
 | 4 | [#9865](https://github.com/carla-simulator/carla/issues/9865) | **Still open / present** (patched in `carla-1.0-citysample.patch`) | Access violation at startup — CDOs at `PostConfigInit` |
-| 5 | [#9866](https://github.com/carla-simulator/carla/issues/9866) | **Still open / present** (worked around via `sun_altitude_angle = -90`) | `ACarlaGameModeBase` spawns a second sun |
+| 5 | [#9866](https://github.com/carla-simulator/carla/issues/9866) | **Still open / present** (patched in `carla-1.0-citysample.patch`: suppresses `BP_Carla_Sky` when external directional sun exists) | `ACarlaGameModeBase` spawns a second sun |
 | 6 | [#9872](https://github.com/carla-simulator/carla/issues/9872) | **Still open / present** (patched in `carla-1.0-citysample.patch`) | Walker navigation dead on an unbuilt `RecastNavMesh` |
-| 7 | [#9871](https://github.com/carla-simulator/carla/issues/9871) | **Still open / present** (resolved with measured ZoneGraph sidewalks) | `get_random_location_from_navigation()` returns `None` forever |
-| 8 | [#9870](https://github.com/carla-simulator/carla/issues/9870) | **Still open / present** (installer deploys to `Content/Map/Nav/`) | The two navmesh lookups look in different places |
-| 9 | [#9869](https://github.com/carla-simulator/carla/issues/9869) | **Still open / present** (`roadnetwork_to_xodr.py` offsets junction IDs) | *OpenDRIVE parser ignores a link's elementType* ([comment](https://github.com/carla-simulator/carla/issues/9869#issuecomment-6076656971)) |
+| 7 | [#9871](https://github.com/carla-simulator/carla/issues/9871) | **Still open / present** (patched in `carla-1.0-citysample.patch` + measured ZoneGraph sidewalks) | `get_random_location_from_navigation()` returns `None` forever |
+| 8 | [#9870](https://github.com/carla-simulator/carla/issues/9870) | **Still open / present** (patched in `carla-1.0-citysample.patch` + installer deploys to `Content/Map/Nav/`) | The two navmesh lookups look in different places |
+| 9 | [#9869](https://github.com/carla-simulator/carla/issues/9869) | **Still open / present** (patched in `carla-1.0-citysample.patch` + `roadnetwork_to_xodr.py` offsets junction IDs) | *OpenDRIVE parser ignores a link's elementType* ([comment](https://github.com/carla-simulator/carla/issues/9869#issuecomment-6076656971)) |
 | 10 | [#10364](https://github.com/carla-simulator/carla/issues/10364) | **Open** (patched in `RayTracer.cpp`, `Tagger.cpp`, `TrafficSignHeightUtils.cpp`; initial PR [#10370](https://github.com/carla-simulator/carla/pull/10370)) | `URayTracer::CastRay` and `ProjectPoint` dereference null `Hit.GetComponent()` on non-UObject physics bodies (`FastGeoStreaming`) |
 | 11 | [#10365](https://github.com/carla-simulator/carla/issues/10365) | **Open** (patched in `RayCastSemanticLidar.cpp`, `HSSLidar.cpp`, `Radar.cpp`, `CarlaTraceChannels.h`; initial PR [#10371](https://github.com/carla-simulator/carla/pull/10371)) | Attached ray-cast sensors do not ignore their parent actor and hardcode `ECC_GameTraceChannel2` |
 | 12 | [#10366](https://github.com/carla-simulator/carla/issues/10366) | **Open** (patched in `ALSM.cpp`; initial PR [#10369](https://github.com/carla-simulator/carla/pull/10369)) | Traffic Manager `ALSM::UpdateUnregisteredActorsData` processes `Dormant` actors, lacks exception guard, and snaps sidewalk walkers onto lanes |
