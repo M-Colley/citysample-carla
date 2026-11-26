@@ -9,8 +9,8 @@ authors:
     # orcid: "https://orcid.org/0000-0000-0000-0000"
 repository-code: "https://github.com/M-Colley/citysample-carla"
 doi: "10.5281/zenodo.22306770"
-version: v1.2.1
-date-released: "2026-11-25"
+version: v1.2.2
+date-released: "2026-11-26"
 identifiers:
   - type: doi
     value: "10.5281/zenodo.22306770"

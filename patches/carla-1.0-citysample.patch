@@ -1819,6 +1819,18 @@ index 7357092..941d8c9 100644
      TraceParams,
      FCollisionResponseParams::DefaultResponseParam
    );
+diff --git a/Unreal/CarlaUnreal/Plugins/Carla/Source/Carla/Sensor/V2X/PathLossModel.h b/Unreal/CarlaUnreal/Plugins/Carla/Source/Carla/Sensor/V2X/PathLossModel.h
+index 7b0d421..8697f3b 100644
+--- a/Unreal/CarlaUnreal/Plugins/Carla/Source/Carla/Sensor/V2X/PathLossModel.h
++++ b/Unreal/CarlaUnreal/Plugins/Carla/Source/Carla/Sensor/V2X/PathLossModel.h
+@@ -8,6 +8,7 @@
+ 
+ #include "CoreMinimal.h"
+ #include "Engine/EngineTypes.h"
++#include "Engine/HitResult.h"
+ 
+ #include <map>
+ #include <vector>
 diff --git a/Unreal/CarlaUnreal/Plugins/Carla/Source/Carla/Server/CarlaServer.cpp b/Unreal/CarlaUnreal/Plugins/Carla/Source/Carla/Server/CarlaServer.cpp
 index dd1eefe..1a27001 100644
 --- a/Unreal/CarlaUnreal/Plugins/Carla/Source/Carla/Server/CarlaServer.cpp

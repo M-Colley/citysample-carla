@@ -75,6 +75,19 @@ fi
 
 mkdir -p "$(dirname "$DEST")"
 
+# When LFS_CACHE defaults inside CARLA_ROOT (.lfs-cache), exclude it in
+# CARLA_ROOT/.git/info/exclude so git status and patch-upgrade checks in
+# CARLA_ROOT never walk 45k cached LFS blobs.
+if [[ "$CACHE" == "$CARLA_ROOT/"* ]] && [[ -d "$CARLA_ROOT/.git/info" ]]; then
+  rel_cache="${CACHE#"$CARLA_ROOT/"}"
+  rel_cache="${rel_cache%/}/"
+  exclude_file="$CARLA_ROOT/.git/info/exclude"
+  touch "$exclude_file"
+  if ! grep -Fqx "$rel_cache" "$exclude_file"; then
+    printf '\n%s\n' "$rel_cache" >> "$exclude_file"
+  fi
+fi
+
 if [[ ! -e "$DEST/.git" ]]; then
   echo "=== 1/4 clone (metadata only, LFS deferred) ==="
   GIT_LFS_SKIP_SMUDGE=1 git clone --depth 1 --no-checkout \

@@ -314,13 +314,13 @@ try {
         & git -C $CarlaRoot apply --check @skipCreated $patch 2>$null
         if ($LASTEXITCODE -ne 0) {
             # Check if $CarlaRoot simply has an earlier version of our City Sample
-            # patch applied (e.g. upgrading from v1.1.x to v1.2.x): every dirty or
-            # untracked file under $CarlaRoot is owned by patches/*.patch.
+            # patch applied (e.g. upgrading from v1.1.x to v1.2.x): every modified
+            # TRACKED file under $CarlaRoot is owned by patches/*.patch. Do NOT scan
+            # untracked directories (such as .lfs-cache/ with 45k LFS objects), which
+            # git apply never touches.
             $dirtyTracked = @(& git -C $CarlaRoot diff --name-only HEAD 2>$null | Where-Object { $_ })
-            $untracked = @(& git -C $CarlaRoot ls-files --others --exclude-standard 2>$null | Where-Object { $_ })
             $foreignDirty = @($dirtyTracked | Where-Object { -not $patchTargetSet.Contains($_) })
-            $foreignUntracked = @($untracked | Where-Object { -not $patchTargetSet.Contains($_) })
-            if (($dirtyTracked.Count + $untracked.Count) -gt 0 -and $foreignDirty.Count -eq 0 -and $foreignUntracked.Count -eq 0) {
+            if ($dirtyTracked.Count -gt 0 -and $foreignDirty.Count -eq 0) {
                 $resetForUpgrade = $true
             } else {
                 & git -C $CarlaRoot apply --check @skipCreated $patch
@@ -445,6 +445,19 @@ if (-not $patchApplied) {
     & git -C $CarlaRoot apply @skipCreated $patch
     if ($LASTEXITCODE -ne 0) { throw "git apply failed after its own check passed: $patchName" }
     Ok $(if ($resetForUpgrade) { "upgraded $patchName" } else { "applied $patchName" })
+}
+
+$carlaServerLib = Join-Path $CarlaRoot "Build\LibCarla\carla-server.lib"
+$libCarlaSrc = Join-Path $CarlaRoot "LibCarla\source"
+if ((Test-Path -LiteralPath $carlaServerLib -PathType Leaf) -and (Test-Path -LiteralPath $libCarlaSrc)) {
+    $libTime = (Get-Item -LiteralPath $carlaServerLib).LastWriteTimeUtc
+    $newestLibSrc = (Get-ChildItem -LiteralPath $libCarlaSrc -Recurse -File -Include *.cpp,*.h -ErrorAction SilentlyContinue |
+                     Measure-Object LastWriteTimeUtc -Maximum).Maximum
+    if ($newestLibSrc -and $newestLibSrc -gt $libTime.AddSeconds(2)) {
+        Write-Warning ("LibCarla sources in $libCarlaSrc are newer than $carlaServerLib.`n" +
+                       "         Run 'SetupWithBuildTools.bat --skip-content' and reinstall the wheel in " +
+                       "$CarlaRoot\Build\PythonAPI\dist\ before Build-CarlaCity.ps1 so LibCarla fixes take effect.")
+    }
 }
 
 # ---------------------------------------------------------------------------

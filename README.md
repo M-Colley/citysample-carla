@@ -21,7 +21,7 @@ You can stop after Part A if you only need the road network, or continue through
 | **[Part A — Road network](#2-part-a--extract-the-road-network)** | `Small_City_LVL` and `Big_City_LVL` exported as ASAM **OpenDRIVE** (`.xodr`) with signals, signs, speed limits, and crosswalks. Runs in any CARLA (`generate_opendrive_world`). | Stock UE 5.8 + City Sample + Python 3.10+ |
 | **[Part B — Full city server](#3-part-b--run-city-sample-as-a-carla-10-server)** | CARLA 1.0 serving the City Sample levels directly — Nanite/Lumen buildings, props, Mass traffic & crowd, pedestrian navmeshes, and full sensor suite. | Also needs CARLA 1.0 + CARLA's UE 5.8 fork built from source (~385 GB disk, 64 GB RAM) |
 
-### Supported Maps (CARLA 1.0, `v1.2.1`)
+### Supported Maps (CARLA 1.0, `v1.2.2`)
 
 | Map | Footprint | Roads & Junctions | Signals & Curbside Signs | Pedestrian NavMesh |
 |---|---|---|---|---|
@@ -134,7 +134,7 @@ Run from **this repository**:
 SetupWithBuildTools.bat --skip-content
 ```
 
-Builds LibCarla, `RecastBuilder.exe`, the Unreal plugin configuration, and the CARLA 1.0 Python wheel under `%CARLA_DIR%\Build\PythonAPI\dist\` (works with either VS 2022 Build Tools or the full IDE). Install the built `.whl` into your Python virtual environment.
+Applies `patches/carla-1.0-citysample.patch` to `%CARLA_DIR%` and builds LibCarla (`carla-server.lib` + `carla-client.lib`), `RecastBuilder.exe`, the Unreal plugin configuration, and the CARLA 1.0 Python wheel under `%CARLA_DIR%\Build\PythonAPI\dist\` (works with either VS 2022 Build Tools or the full IDE). Install the built `.whl` into your Python virtual environment. *(Whenever a future `git pull` updates `LibCarla/` hunks in `patches/carla-1.0-citysample.patch`, re-run `SetupWithBuildTools.bat --skip-content` and reinstall the wheel before `Build-CarlaCity.ps1`; `Integrate-CarlaIntoCitySample.ps1` warns automatically when `carla-server.lib` is older than `LibCarla/source`.)*
 
 ### Step 3 — Build the pedestrian navmesh (recommended)
 
@@ -226,7 +226,7 @@ python %CARLA_DIR%/PythonAPI/examples/nvidia/nurec/nurec_runner.py --port 2000 -
 
 ---
 
-## 5. Measured Validation (`v1.2.1` on CARLA 1.0)
+## 5. Measured Validation (`v1.2.2` on CARLA 1.0)
 
 All figures below were measured on the live CARLA `1.0` server (`3ea166118d2c` / UE 5.8 `b76fce0e3bcb`) with default `SyncTrafficLights=1`, default `FastGeoTagger=1`, default native-sun lighting, and `MassBridge` enabled:
 

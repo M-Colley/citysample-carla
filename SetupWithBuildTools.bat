@@ -34,6 +34,7 @@ rem Beside this script, wherever it was copied to (%~dp0 ends with a backslash).
 rem This was an absolute path to one machine, so every other copy went looking
 rem for the fetch script somewhere that did not exist.
 set "FETCH=%~dp0tools\fetch-carla-content.sh"
+set "RELEASE_PATCH=%~dp0patches\carla-1.0-citysample.patch"
 
 set "SKIP_CONTENT="
 if /I "%~1"=="--skip-content" set "SKIP_CONTENT=1"
@@ -94,6 +95,10 @@ if defined SKIP_CONTENT set "CONTENT_ACTION=--check"
 if errorlevel 1 exit /b 1
 
 :build
+if /I "%SOURCE_REV%"=="3ea166118d2c3c094b13b15c5b7a66a9a279998d" (
+    call :ensure_release_patch
+    if errorlevel 1 exit /b 1
+)
 echo === 2/4 activating Build Tools x64 environment ===
 call "%VCVARS%"
 if errorlevel 1 exit /b 1
@@ -130,4 +135,31 @@ if /I not "%ENGINE_REV%"=="b76fce0e3bcbb400efe1fe38bc2d662b33e6d989" (
 )
 if not defined DLSS_SDK set "DLSS_SDK=disabled"
 set DLSS_OPTION="-DCARLA_DLSS_SDK_PATH=%DLSS_SDK%"
+exit /b 0
+
+:ensure_release_patch
+if not exist "%RELEASE_PATCH%" exit /b 0
+git -C "%CARLA_ROOT%" apply --reverse --check "%RELEASE_PATCH%" >nul 2>&1
+if not errorlevel 1 (
+    echo   OK   carla-1.0-citysample.patch already applied
+    exit /b 0
+)
+git -C "%CARLA_ROOT%" apply --check "%RELEASE_PATCH%" >nul 2>&1
+if not errorlevel 1 (
+    git -C "%CARLA_ROOT%" apply "%RELEASE_PATCH%"
+    if errorlevel 1 exit /b 1
+    echo   OK   applied carla-1.0-citysample.patch before LibCarla build
+    exit /b 0
+)
+powershell -NoProfile -ExecutionPolicy Bypass -Command ^
+    "$ErrorActionPreference='Stop'; $root='%CARLA_ROOT%'; $patch='%RELEASE_PATCH%'; " ^
+    "$set=[System.Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase); " ^
+    "Get-ChildItem (Split-Path $patch -Parent) -Filter '*.patch' | ForEach-Object { foreach($m in [regex]::Matches((Get-Content $_.FullName -Raw),'(?m)^\+\+\+ b/([^\r\n]+)')){ [void]$set.Add($m.Groups[1].Value) } }; " ^
+    "$ErrorActionPreference='Continue'; $dirty=@(& git -C $root diff --name-only HEAD 2>$null | Where-Object { $_ }); " ^
+    "$foreign=@($dirty | Where-Object { -not $set.Contains($_) }); " ^
+    "if ($dirty.Count -eq 0 -or $foreign.Count -gt 0) { Write-Error 'Cannot upgrade CARLA patch automatically due to non-patch local edits.'; exit 1 }; " ^
+    "& git -C $root reset --quiet HEAD 2>$null; $d2=@(& git -C $root diff --name-only 2>$null | Where-Object { $_ }); if ($d2.Count -gt 0) { & git -C $root checkout -- @d2 }; " ^
+    "foreach($rel in $set){ & git -C $root cat-file -e \"HEAD:$rel\" 2>$null; if ($LASTEXITCODE -ne 0){ $f=Join-Path $root $rel; if(Test-Path -LiteralPath $f -PathType Leaf){ Remove-Item -LiteralPath $f -Force } } }; " ^
+    "& git -C $root apply $patch; if ($LASTEXITCODE -ne 0) { exit 1 }; Write-Host '  OK   upgraded carla-1.0-citysample.patch before LibCarla build'"
+if errorlevel 1 exit /b 1
 exit /b 0
